@@ -188,24 +188,13 @@ ORDER_PRE_FWD_GLOBAL = False              # True: ordena TODAS las estructuras g
 RANKING_MODE = "theta_total"             # Métrica de ranking para ordenar estructuras Allantis
                                           # "theta_total": Theta total (por defecto para Allantis)
                                           # "AQI_ABS": Allantis Quality Index (INERTE - a desarrollar)
-                                          # "RATIO_BWB": Ratio ancho BWB / net_credit
 
 # ================== UMBRALES PARA GRÁFICOS FILTRADOS (Subconjuntos de Alta Calidad) ==================
 # Controla qué estructuras se incluyen en los gráficos 3A/3B, 4A/4B, 5A/5B y 6A/6B
 
-FILTER_RATIO_BWB_THRESHOLD = 5.0     # Umbral para gráficos de RATIO_BWB: (k_ul - k_ll) / |net_credit|
-                                       # Gráficos 3A/3B mostrarán solo estructuras con RATIO_BWB > este valor
-                                       # Ejemplo: 5.0 → ancho BWB al menos 5x el crédito
-                                       # Valores altos indican mejor ratio riesgo/recompensa
-
 FILTER_AQI_ABS_THRESHOLD = 2.0        # Umbral para gráficos de AQI_ABS (Allantis Quality Index - INERTE)
                                        # DESHABILITADO: AQI no está implementado aún
                                        # A desarrollar cuando se defina la métrica de calidad para BWB+Calendar
-
-FILTER_FF_ATM_THRESHOLD = 0.2         # Umbral para gráficos de FF_ATM (Forward Factor ATM)
-                                       # Gráficos 5A/5B mostrarán solo estructuras con FF_ATM > este valor
-                                       # Ejemplo: 0.2 → solo batmans con Forward Factor ATM mayor a 0.2
-                                       # NOTA: FF_ATM > 0 indica backwardation (favorable para long calendar)
 
 FILTER_FF_BAT_THRESHOLD = 0.1         # Umbral para gráficos de FF_BAT (Forward Factor Batman)
                                        # Gráficos 6A/6B mostrarán solo estructuras con FF_BAT > este valor
@@ -1827,85 +1816,6 @@ def allantis_value_from_df(one_min_df: pd.DataFrame, exp1: str, k_ul: float, k_s
     except Exception:
         return None
 
-# ================== FORWARD FACTOR (FF_ATM) ==================
-def compute_FF_ATM(ATM_front, ATM_back, T1_years, T2_years, row_identifier=""):
-    """
-    Calcula el Forward Factor (FF_ATM) comparando la IV del front con la IV forward implícita.
-
-    El Forward Factor mide cuánto más "caliente" está la IV del front respecto al tramo futuro.
-    - FF > 0: backwardation (front caliente), favorece long calendar
-    - FF < 0: contango (front frío)
-
-    Args:
-        ATM_front: IV anualizada del front leg (decimal, ej. 0.35 para 35%)
-        ATM_back: IV anualizada del back leg (decimal, ej. 0.35 para 35%)
-        T1_years: Tiempo al vencimiento T1 en años
-        T2_years: Tiempo al vencimiento T2 en años
-        row_identifier: String identificador de la fila para logging (opcional)
-
-    Returns:
-        float: FF_ATM redondeado a 6 decimales, o np.nan si no es válido
-
-    Formula:
-        V1 = IV1²
-        V2 = IV2²
-        V_fwd = (V2·T2 - V1·T1) / (T2 - T1)
-        IV_fwd = √V_fwd
-        FF = IV1 / IV_fwd - 1
-    """
-    try:
-        # Validar inputs
-        if ATM_front is None or ATM_back is None or T1_years is None or T2_years is None:
-            return np.nan
-
-        # Convertir a float
-        iv1 = float(ATM_front)
-        iv2 = float(ATM_back)
-        t1 = float(T1_years)
-        t2 = float(T2_years)
-
-        # Validar que son números finitos
-        if not (np.isfinite(iv1) and np.isfinite(iv2) and np.isfinite(t1) and np.isfinite(t2)):
-            return np.nan
-
-        # Validar que IVs son positivas
-        if iv1 <= 0 or iv2 <= 0:
-            return np.nan
-
-        # Validar que T2 > T1 (condición necesaria)
-        if t2 <= t1:
-            # Log a nivel debug (silencioso)
-            if row_identifier:
-                pass  # En producción: logging.debug(f"[FF_ATM] T2 <= T1 para {row_identifier}")
-            return np.nan
-
-        # Calcular varianzas
-        v1 = iv1 * iv1
-        v2 = iv2 * iv2
-
-        # Calcular varianza forward
-        v_fwd = (v2 * t2 - v1 * t1) / (t2 - t1)
-
-        # Validar que varianza forward es positiva
-        if v_fwd <= 0:
-            # Log a nivel debug (silencioso)
-            if row_identifier:
-                pass  # En producción: logging.debug(f"[FF_ATM] V_fwd <= 0 para {row_identifier}")
-            return np.nan
-
-        # Calcular IV forward
-        iv_fwd = math.sqrt(v_fwd)
-
-        # Calcular Forward Factor
-        ff = (iv1 / iv_fwd) - 1.0
-
-        # Redondear a 6 decimales
-        return round(ff, 6)
-
-    except Exception as e:
-        # En caso de cualquier error, retornar NaN silenciosamente
-        return np.nan
-
 # ================== FORWARD FACTOR BATMAN (FF_BAT) ==================
 def compute_FF_BAT(IV2_K2, T2_years, IV1_K1, IV1_K3, T1_years, vega_K1, vega_K3, row_identifier=""):
     """
@@ -2166,33 +2076,6 @@ def compute_strategy_metrics(spot,r_base,exp1,dte1,k1,exp2,dte2,k2,k3,precache):
     iv2_fmt = None if (iv2 is None or (isinstance(iv2,float) and math.isnan(iv2))) else round(float(iv2),6)
     iv3_fmt = None if (iv3 is None or (isinstance(iv3,float) and math.isnan(iv3))) else round(float(iv3),6)
 
-    # Calcular FF_ATM (Forward Factor)
-    # Para Batman: ATM_front = promedio IV de wings (k1, k3), ATM_back = IV de body (k2)
-    # Identificador de fila para logging (opcional)
-    row_id = f"{exp1}/{exp2}|{k1}/{k2}/{k3}"
-
-    # Calcular ATM_front como promedio de IVs de las wings (front expiration)
-    atm_front = None
-    valid_wings = []
-    if iv1 is not None and not (isinstance(iv1, float) and math.isnan(iv1)):
-        valid_wings.append(float(iv1))
-    if iv3 is not None and not (isinstance(iv3, float) and math.isnan(iv3)):
-        valid_wings.append(float(iv3))
-    if valid_wings:
-        atm_front = sum(valid_wings) / len(valid_wings)
-
-    # ATM_back es la IV del body (back expiration)
-    atm_back = iv2 if (iv2 is not None and not (isinstance(iv2, float) and math.isnan(iv2))) else None
-
-    # Calcular FF_ATM
-    ff_atm_val = compute_FF_ATM(
-        ATM_front=atm_front,
-        ATM_back=atm_back,
-        T1_years=T1,
-        T2_years=T2,
-        row_identifier=row_id
-    )
-
     # Calcular FF_BAT (Batman-aware Forward Factor)
     # Necesitamos las vegas de K1 y K3 para ponderar
     vega_k1 = np.nan
@@ -2244,7 +2127,6 @@ def compute_strategy_metrics(spot,r_base,exp1,dte1,k1,exp2,dte2,k2,k3,precache):
         "iv_k2": iv2_fmt,
         "iv_k3": iv3_fmt,
 
-        "FF_ATM": ff_atm_val if np.isfinite(ff_atm_val) else None,
         "FF_BAT": ff_bat_val if np.isfinite(ff_bat_val) else None,
         "RATIO_BATMAN": round(ratio_batman, 4) if np.isfinite(ratio_batman) else None,
 
@@ -2474,38 +2356,6 @@ def compute_allantis_metrics(spot, r_base, exp1, dte1, k_ul, k_shorts, k_ll, k_c
     iv_c_short_fmt = None if (iv_c_short is None or (isinstance(iv_c_short, float) and math.isnan(iv_c_short))) else round(float(iv_c_short), 6)
     iv_c_long_fmt = None if (iv_c_long is None or (isinstance(iv_c_long, float) and math.isnan(iv_c_long))) else round(float(iv_c_long), 6)
 
-    # Calcular FF_ATM para Allantis
-    # ATM_front: promedio de IVs de DTE1 (UL, Shorts, LL, C_Short)
-    # ATM_back: IV de C_Long @ DTE2
-    row_id = f"{exp1}/{exp2}|UL{k_ul}/S{k_shorts}/LL{k_ll}/C{k_call}"
-
-    atm_front = None
-    valid_front = []
-    for iv_val in [iv_ul, iv_shorts, iv_ll, iv_c_short]:
-        if iv_val is not None and not (isinstance(iv_val, float) and math.isnan(iv_val)):
-            valid_front.append(float(iv_val))
-    if valid_front:
-        atm_front = sum(valid_front) / len(valid_front)
-
-    atm_back = iv_c_long if (iv_c_long is not None and not (isinstance(iv_c_long, float) and math.isnan(iv_c_long))) else None
-
-    ff_atm_val = compute_FF_ATM(
-        ATM_front=atm_front,
-        ATM_back=atm_back,
-        T1_years=T1,
-        T2_years=T2,
-        row_identifier=row_id
-    )
-
-    # Para Allantis no calculamos FF_BAT (específico de Batman)
-    # En su lugar, calculamos un ratio específico para BWB
-    # RATIO_BWB: (k_ul - k_ll) / abs(net_credit) - ancho del BWB por punto de crédito
-    spread_bwb = float(k_ul) - float(k_ll)
-    if net_credit != 0 and np.isfinite(net_credit):
-        ratio_bwb = spread_bwb / abs(net_credit)
-    else:
-        ratio_bwb = np.nan
-
     # ================== CÁLCULO DE PUNTOS GEOMÉTRICOS ALLANTIS @ VENCIMIENTO DTE1 ==================
     # Estructura: BWB de Puts + Call Calendar
     # Puntos: LEL, PuntoLEL, BreakEvenBWB1, PICOBWB, BreakEvenBWB2, VALLE, BreakEvenCCAL1, PICOCCAL, BreakEvenCCAL2, UEL
@@ -2692,10 +2542,6 @@ def compute_allantis_metrics(spot, r_base, exp1, dte1, k_ul, k_shorts, k_ll, k_c
         "iv_ll": iv_ll_fmt,
         "iv_c_short": iv_c_short_fmt,
         "iv_c_long": iv_c_long_fmt,
-
-        # Forward Factors y ratios
-        "FF_ATM": ff_atm_val if np.isfinite(ff_atm_val) else None,
-        "RATIO_BWB": round(ratio_bwb, 4) if np.isfinite(ratio_bwb) else None,
 
         "DTE1/DTE2": f"{int(round(dte1))}/{int(round(dte2))}",
 
@@ -4825,7 +4671,7 @@ def analyze_feature_importance_rf(df: pd.DataFrame, ratio_cols: List[str], pnl_c
 
 def analyze_regimes(df: pd.DataFrame, ratio_cols: List[str], pnl_col: str, params: AnalysisParams) -> Dict[str, Any]:
     """
-    Segmenta el dataset por regímenes (BQI_ABS, FF_ATM) y analiza correlaciones por régimen.
+    Segmenta el dataset por regímenes (BQI_ABS) y analiza correlaciones por régimen.
 
     Returns:
         Dict con análisis por régimen
@@ -4850,22 +4696,6 @@ def analyze_regimes(df: pd.DataFrame, ratio_cols: List[str], pnl_col: str, param
                 'low': {'n': len(low_bqi), 'corr_df': low_corr, 'threshold': bqi_median}
             }
             logger.info(f"  [REGIMES] BQI_ABS: High n={len(high_bqi)}, Low n={len(low_bqi)}, threshold={bqi_median:.2f}")
-
-    # Régimen 2: FF_ATM (si existe)
-    if 'FF_ATM' in df.columns:
-        ff_median = df['FF_ATM'].median()
-        high_ff = df[df['FF_ATM'] > ff_median]
-        low_ff = df[df['FF_ATM'] <= ff_median]
-
-        if len(high_ff) >= params.min_n and len(low_ff) >= params.min_n:
-            high_corr = compute_correlation_suite(high_ff, ratio_cols, pnl_col, params)
-            low_corr = compute_correlation_suite(low_ff, ratio_cols, pnl_col, params)
-
-            regimes['FF_ATM'] = {
-                'high': {'n': len(high_ff), 'corr_df': high_corr, 'threshold': ff_median},
-                'low': {'n': len(low_ff), 'corr_df': low_corr, 'threshold': ff_median}
-            }
-            logger.info(f"  [REGIMES] FF_ATM: High n={len(high_ff)}, Low n={len(low_ff)}, threshold={ff_median:.2f}")
 
     return regimes
 
@@ -5265,7 +5095,6 @@ def run_statistical_analysis(csv_path: str):
     # LISTA FILTRADA DE RATIOS/VARIABLES A ANALIZAR
     ALLOWED_RATIOS = [
         'BQI_ABS',
-        'FF_ATM',
         'FF_BAT',
         'RATIO_BATMAN',
         'delta_total',
@@ -5692,6 +5521,7 @@ def main():
                 rows=[]
 
                 # ========== PARALELIZACIÓN DE SELECCIÓN DE CANDIDATOS ALLANTIS ==========
+                print(f"     [INFO] Generando combinaciones de estructuras Allantis...")
                 # Allantis: 5 patas (UL, Shorts, LL puts @ DTE1 + Short/Long calls)
                 # Preparar todas las tareas de k_ul para procesamiento paralelo
                 tasks = []
@@ -5777,9 +5607,11 @@ def main():
                 df_day = optimize_dtypes(df_day)
 
                 # Guardar Parquet incremental
+                print(f"     [INFO] Guardando {len(rows)} estructuras en archivo parquet...")
                 parquet_path = temp_dir / f"day_{pick_idx:03d}_{date_str_us.replace('-', '')}.parquet"
                 df_day.to_parquet(parquet_path, index=False, engine='pyarrow', compression='snappy')
                 parquet_files.append(parquet_path)
+                print(f"     [✓] Guardado: {parquet_path.name}")
 
                 mem_mb = df_day.memory_usage(deep=True).sum() / 1024**2
                 print(f"     [STREAM] Volcado incremental: {parquet_path.name} ({len(df_day)} filas, {mem_mb:.1f} MB)")
@@ -6305,30 +6137,22 @@ def main():
 
             # Determinar columnas de ordenamiento según criterio (adaptado para Allantis)
             if choice in ("theta", "t", "θ", "theta_total"):
-                sort_cols = ["theta_total", "FF_ATM", "RATIO_BWB"]
-                sort_asc = [False, False, False]
-                used = "theta_total → FF_ATM → RATIO_BWB"
+                sort_cols = ["theta_total", "delta_total"]
+                sort_asc = [False, False]
+                used = "theta_total → delta_total"
             elif choice in ("delta", "d", "delta_total"):
-                sort_cols = ["delta_total", "theta_total", "FF_ATM"]
-                sort_asc = [False, False, False]
-                used = "delta_total → theta_total → FF_ATM"
-            elif choice in ("ff", "ff_atm", "forward_factor"):
-                sort_cols = ["FF_ATM", "theta_total", "RATIO_BWB"]
-                sort_asc = [False, False, False]
-                used = "FF_ATM → theta_total → RATIO_BWB"
-            elif choice in ("ratio", "ratio_bwb", "bwb"):
-                sort_cols = ["RATIO_BWB", "theta_total", "FF_ATM"]
-                sort_asc = [False, False, False]
-                used = "RATIO_BWB → theta_total → FF_ATM"
+                sort_cols = ["delta_total", "theta_total"]
+                sort_asc = [False, False]
+                used = "delta_total → theta_total"
             elif choice in ("credit", "net_credit", "nc"):
-                sort_cols = ["net_credit", "theta_total", "FF_ATM"]
-                sort_asc = [True, False, False]  # Menor net_credit primero (más crédito recibido)
-                used = "net_credit → theta_total → FF_ATM"
+                sort_cols = ["net_credit", "theta_total"]
+                sort_asc = [True, False]  # Menor net_credit primero (más crédito recibido)
+                used = "net_credit → theta_total"
             else:
                 # Default: theta_total
-                sort_cols = ["theta_total", "FF_ATM", "RATIO_BWB"]
-                sort_asc = [False, False, False]
-                used = "theta_total → FF_ATM → RATIO_BWB"
+                sort_cols = ["theta_total", "delta_total"]
+                sort_asc = [False, False]
+                used = "theta_total → delta_total"
 
             # Ejecutar ordenamiento según estrategia
             if sort_strategy == "in_memory":
@@ -6785,8 +6609,6 @@ def main():
             # Columnas principales en orden específico
             "dia",
             "url",
-            "FF_ATM",
-            "RATIO_BWB",              # Reemplaza RATIO_BATMAN
             "net_credit",
             "DTE1/DTE2",
             "k_ul",                   # Strikes de Allantis (5 patas)
@@ -7234,8 +7056,6 @@ def main():
                 # Columnas principales en orden específico
                 "dia",
                 "url",
-                "FF_ATM",
-                "RATIO_BWB",              # Reemplaza RATIO_BATMAN para Allantis
                 "net_credit",
                 "DTE1/DTE2",
                 "k_ul",                   # Strikes de Allantis (5 patas)
@@ -7414,84 +7234,6 @@ def main():
             pnl_pts_cols = [col for col in df_copy.columns if col.startswith("PnL_fwd_pts_") and col.endswith("_mediana")]
 
             # ============================================================
-            # GRÁFICOS 3A/3B: FILTRADOS POR RATIO_BATMAN > FILTER_RATIO_BATMAN_THRESHOLD
-            # ============================================================
-            if "RATIO_BATMAN" in df_copy.columns:
-                df_ratio_filtered = df_copy[pd.to_numeric(df_copy["RATIO_BATMAN"], errors='coerce') > FILTER_RATIO_BATMAN_THRESHOLD]
-                n_ratio = len(df_ratio_filtered)
-
-                if n_ratio > 0:
-                    print(f"\n[GRÁFICOS 3A/3B] Filtrado por RATIO_BATMAN > {FILTER_RATIO_BATMAN_THRESHOLD} (n={n_ratio}/{len(df_copy)})")
-
-                    # GRÁFICO 3A: PnL_fwd_pct
-                    if len(pnl_pct_cols) > 0:
-                        promedios_ratio_pct = []
-                        labels_ratio_pct = []
-
-                        for col in pnl_pct_cols:
-                            sufijo = col.replace("PnL_fwd_pct_", "").replace("_mediana", "")
-                            valid_data = pd.to_numeric(df_ratio_filtered[col], errors="coerce").dropna()
-                            if len(valid_data) > 0:
-                                promedio = valid_data.mean()
-                                promedios_ratio_pct.append(promedio)
-                                labels_ratio_pct.append(f"W{sufijo}")
-
-                        if len(promedios_ratio_pct) > 0:
-                            fig, ax = plt.subplots(figsize=(10, 6))
-                            ax.plot(labels_ratio_pct, promedios_ratio_pct, 'o-', linewidth=2.5, markersize=10, color='#9b59b6', label='Promedio PnL %')
-                            ax.axhline(y=0, color='red', linestyle='--', linewidth=1.5, alpha=0.7)
-                            ax.set_xlabel('Ventana Forward (% de DTE)', fontsize=12, fontweight='bold')
-                            ax.set_ylabel('Promedio PnL (%)', fontsize=12, fontweight='bold')
-                            ax.set_title(f'Promedio PnL_fwd_pct_mediana por Periodo W\n(Filtrado: RATIO_BATMAN > {FILTER_RATIO_BATMAN_THRESHOLD}, n={n_ratio})', fontsize=13, fontweight='bold')
-                            ax.grid(True, alpha=0.3)
-                            ax.legend(fontsize=10)
-                            plt.tight_layout()
-
-                            plot_name_ratio_pct = batch_out_name.replace(".csv", f"_T0_RATIO_BATMAN_gt{FILTER_RATIO_BATMAN_THRESHOLD}_pct.png")
-                            plot_path_ratio_pct = DESKTOP / plot_name_ratio_pct
-                            plt.savefig(plot_path_ratio_pct, dpi=150, bbox_inches='tight')
-                            plt.close()
-
-                            print(f"  ✓ [3A] Guardado: {plot_path_ratio_pct}")
-                            print(f"  Valores: {', '.join([f'{labels_ratio_pct[i]}={promedios_ratio_pct[i]:.2f}%' for i in range(len(promedios_ratio_pct))])}")
-
-                    # GRÁFICO 3B: PnL_fwd_pts
-                    if len(pnl_pts_cols) > 0:
-                        promedios_ratio_pts = []
-                        labels_ratio_pts = []
-
-                        for col in pnl_pts_cols:
-                            sufijo = col.replace("PnL_fwd_pts_", "").replace("_mediana", "")
-                            valid_data = pd.to_numeric(df_ratio_filtered[col], errors="coerce").dropna()
-                            if len(valid_data) > 0:
-                                promedio = valid_data.mean()
-                                promedios_ratio_pts.append(promedio)
-                                labels_ratio_pts.append(f"W{sufijo}")
-
-                        if len(promedios_ratio_pts) > 0:
-                            fig, ax = plt.subplots(figsize=(10, 6))
-                            ax.plot(labels_ratio_pts, promedios_ratio_pts, 's-', linewidth=2.5, markersize=10, color='#9b59b6', label='Promedio PnL pts')
-                            ax.axhline(y=0, color='red', linestyle='--', linewidth=1.5, alpha=0.7)
-                            ax.set_xlabel('Ventana Forward (% de DTE)', fontsize=12, fontweight='bold')
-                            ax.set_ylabel('Promedio PnL (puntos)', fontsize=12, fontweight='bold')
-                            ax.set_title(f'Promedio PnL_fwd_pts_mediana por Periodo W\n(Filtrado: RATIO_BATMAN > {FILTER_RATIO_BATMAN_THRESHOLD}, n={n_ratio})', fontsize=13, fontweight='bold')
-                            ax.grid(True, alpha=0.3)
-                            ax.legend(fontsize=10)
-                            plt.tight_layout()
-
-                            plot_name_ratio_pts = batch_out_name.replace(".csv", f"_T0_RATIO_BATMAN_gt{FILTER_RATIO_BATMAN_THRESHOLD}_pts.png")
-                            plot_path_ratio_pts = DESKTOP / plot_name_ratio_pts
-                            plt.savefig(plot_path_ratio_pts, dpi=150, bbox_inches='tight')
-                            plt.close()
-
-                            print(f"  ✓ [3B] Guardado: {plot_path_ratio_pts}")
-                            print(f"  Valores: {', '.join([f'{labels_ratio_pts[i]}={promedios_ratio_pts[i]:.2f}pts' for i in range(len(promedios_ratio_pts))])}")
-                else:
-                    print(f"\n[GRÁFICOS 3A/3B] ⚠️ No hay datos con RATIO_BATMAN > {FILTER_RATIO_BATMAN_THRESHOLD}")
-            else:
-                print(f"\n[GRÁFICOS 3A/3B] ⚠️ Columna 'RATIO_BATMAN' no encontrada")
-
-            # ============================================================
             # GRÁFICOS 4A/4B: FILTRADOS POR BQI_ABS > FILTER_BQI_ABS_THRESHOLD
             # ============================================================
             if "BQI_ABS" in df_copy.columns:
@@ -7568,84 +7310,6 @@ def main():
                     print(f"\n[GRÁFICOS 4A/4B] ⚠️ No hay datos con BQI_ABS > {FILTER_BQI_ABS_THRESHOLD}")
             else:
                 print(f"\n[GRÁFICOS 4A/4B] ⚠️ Columna 'BQI_ABS' no encontrada")
-
-            # ============================================================
-            # GRÁFICOS 5A/5B: FILTRADOS POR FF_ATM > FILTER_FF_ATM_THRESHOLD
-            # ============================================================
-            if "FF_ATM" in df_copy.columns:
-                df_ff_filtered = df_copy[pd.to_numeric(df_copy["FF_ATM"], errors='coerce') > FILTER_FF_ATM_THRESHOLD]
-                n_ff = len(df_ff_filtered)
-
-                if n_ff > 0:
-                    print(f"\n[GRÁFICOS 5A/5B] Filtrado por FF_ATM > {FILTER_FF_ATM_THRESHOLD} (n={n_ff}/{len(df_copy)})")
-
-                    # GRÁFICO 5A: PnL_fwd_pct
-                    if len(pnl_pct_cols) > 0:
-                        promedios_ff_pct = []
-                        labels_ff_pct = []
-
-                        for col in pnl_pct_cols:
-                            sufijo = col.replace("PnL_fwd_pct_", "").replace("_mediana", "")
-                            valid_data = pd.to_numeric(df_ff_filtered[col], errors="coerce").dropna()
-                            if len(valid_data) > 0:
-                                promedio = valid_data.mean()
-                                promedios_ff_pct.append(promedio)
-                                labels_ff_pct.append(f"W{sufijo}")
-
-                        if len(promedios_ff_pct) > 0:
-                            fig, ax = plt.subplots(figsize=(10, 6))
-                            ax.plot(labels_ff_pct, promedios_ff_pct, 'o-', linewidth=2.5, markersize=10, color='#1abc9c', label='Promedio PnL %')
-                            ax.axhline(y=0, color='red', linestyle='--', linewidth=1.5, alpha=0.7)
-                            ax.set_xlabel('Ventana Forward (% de DTE)', fontsize=12, fontweight='bold')
-                            ax.set_ylabel('Promedio PnL (%)', fontsize=12, fontweight='bold')
-                            ax.set_title(f'Promedio PnL_fwd_pct_mediana por Periodo W\n(Filtrado: FF_ATM > {FILTER_FF_ATM_THRESHOLD}, n={n_ff})', fontsize=13, fontweight='bold')
-                            ax.grid(True, alpha=0.3)
-                            ax.legend(fontsize=10)
-                            plt.tight_layout()
-
-                            plot_name_ff_pct = batch_out_name.replace(".csv", f"_T0_FF_ATM_gt{FILTER_FF_ATM_THRESHOLD}_pct.png")
-                            plot_path_ff_pct = DESKTOP / plot_name_ff_pct
-                            plt.savefig(plot_path_ff_pct, dpi=150, bbox_inches='tight')
-                            plt.close()
-
-                            print(f"  ✓ [5A] Guardado: {plot_path_ff_pct}")
-                            print(f"  Valores: {', '.join([f'{labels_ff_pct[i]}={promedios_ff_pct[i]:.2f}%' for i in range(len(promedios_ff_pct))])}")
-
-                    # GRÁFICO 5B: PnL_fwd_pts
-                    if len(pnl_pts_cols) > 0:
-                        promedios_ff_pts = []
-                        labels_ff_pts = []
-
-                        for col in pnl_pts_cols:
-                            sufijo = col.replace("PnL_fwd_pts_", "").replace("_mediana", "")
-                            valid_data = pd.to_numeric(df_ff_filtered[col], errors="coerce").dropna()
-                            if len(valid_data) > 0:
-                                promedio = valid_data.mean()
-                                promedios_ff_pts.append(promedio)
-                                labels_ff_pts.append(f"W{sufijo}")
-
-                        if len(promedios_ff_pts) > 0:
-                            fig, ax = plt.subplots(figsize=(10, 6))
-                            ax.plot(labels_ff_pts, promedios_ff_pts, 's-', linewidth=2.5, markersize=10, color='#1abc9c', label='Promedio PnL pts')
-                            ax.axhline(y=0, color='red', linestyle='--', linewidth=1.5, alpha=0.7)
-                            ax.set_xlabel('Ventana Forward (% de DTE)', fontsize=12, fontweight='bold')
-                            ax.set_ylabel('Promedio PnL (puntos)', fontsize=12, fontweight='bold')
-                            ax.set_title(f'Promedio PnL_fwd_pts_mediana por Periodo W\n(Filtrado: FF_ATM > {FILTER_FF_ATM_THRESHOLD}, n={n_ff})', fontsize=13, fontweight='bold')
-                            ax.grid(True, alpha=0.3)
-                            ax.legend(fontsize=10)
-                            plt.tight_layout()
-
-                            plot_name_ff_pts = batch_out_name.replace(".csv", f"_T0_FF_ATM_gt{FILTER_FF_ATM_THRESHOLD}_pts.png")
-                            plot_path_ff_pts = DESKTOP / plot_name_ff_pts
-                            plt.savefig(plot_path_ff_pts, dpi=150, bbox_inches='tight')
-                            plt.close()
-
-                            print(f"  ✓ [5B] Guardado: {plot_path_ff_pts}")
-                            print(f"  Valores: {', '.join([f'{labels_ff_pts[i]}={promedios_ff_pts[i]:.2f}pts' for i in range(len(promedios_ff_pts))])}")
-                else:
-                    print(f"\n[GRÁFICOS 5A/5B] ⚠️ No hay datos con FF_ATM > {FILTER_FF_ATM_THRESHOLD}")
-            else:
-                print(f"\n[GRÁFICOS 5A/5B] ⚠️ Columna 'FF_ATM' no encontrada")
 
             # ============================================================
             # GRÁFICOS 6A/6B: FILTRADOS POR FF_BAT > FILTER_FF_BAT_THRESHOLD
