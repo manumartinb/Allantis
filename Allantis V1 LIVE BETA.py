@@ -185,25 +185,22 @@ FWD_PLOT_ENABLED = False  # True: genera gráficos PNG con promedios de PnL_fwd_
 # Orden global pre-FWD (ranking de estructuras antes de aplicar filtros FWD)
 ORDER_PRE_FWD_GLOBAL = False              # True: ordena TODAS las estructuras globalmente antes de FWD
                                           # False: ordena por archivo (no recomendado)
-RANKING_MODE = "BQI_ABS"                 # Métrica de ranking para ordenar estructuras
-                                          # "BQI_ABS": Batman Quality Index Absoluto (balance spread/riesgo)
-                                          # "PnLDV": Profit & Loss en Death Valley (peor escenario)
-                                          # "EarScore": Earnings Score (simetría de orejas del Batman)
+RANKING_MODE = "theta_total"             # Métrica de ranking para ordenar estructuras Allantis
+                                          # "theta_total": Theta total (por defecto para Allantis)
+                                          # "AQI_ABS": Allantis Quality Index (INERTE - a desarrollar)
+                                          # "RATIO_BWB": Ratio ancho BWB / net_credit
 
 # ================== UMBRALES PARA GRÁFICOS FILTRADOS (Subconjuntos de Alta Calidad) ==================
 # Controla qué estructuras se incluyen en los gráficos 3A/3B, 4A/4B, 5A/5B y 6A/6B
 
-FILTER_RATIO_BATMAN_THRESHOLD = 5.0  # Umbral para gráficos de RATIO_BATMAN: (K3-K1) / |net_credit|
-                                       # Gráficos 3A/3B mostrarán solo estructuras con RATIO_BATMAN > este valor
-                                       # Ejemplo: 5.0 → solo batmans con ratio spread/crédito mayor a 5
+FILTER_RATIO_BWB_THRESHOLD = 5.0     # Umbral para gráficos de RATIO_BWB: (k_ul - k_ll) / |net_credit|
+                                       # Gráficos 3A/3B mostrarán solo estructuras con RATIO_BWB > este valor
+                                       # Ejemplo: 5.0 → ancho BWB al menos 5x el crédito
                                        # Valores altos indican mejor ratio riesgo/recompensa
-                                       # Típico: 3-10 para batmans con buen balance
 
-FILTER_BQI_ABS_THRESHOLD = 2.0        # Umbral para gráficos de BQI_ABS (Batman Quality Index Absoluto)
-                                       # Gráficos 4A/4B mostrarán solo estructuras con BQI_ABS > este valor
-                                       # Ejemplo: 2.0 → solo batmans con BQI_ABS mayor a 2.0
-                                       # BQI_ABS mide el balance entre spread width y riesgo
-                                       # Valores altos indican estructuras de mejor calidad
+FILTER_AQI_ABS_THRESHOLD = 2.0        # Umbral para gráficos de AQI_ABS (Allantis Quality Index - INERTE)
+                                       # DESHABILITADO: AQI no está implementado aún
+                                       # A desarrollar cuando se defina la métrica de calidad para BWB+Calendar
 
 FILTER_FF_ATM_THRESHOLD = 0.2         # Umbral para gráficos de FF_ATM (Forward Factor ATM)
                                        # Gráficos 5A/5B mostrarán solo estructuras con FF_ATM > este valor
@@ -318,44 +315,52 @@ LONG_CALL_DELTA_MAX = 0.35   # ! Delta máximo para long calls
 # Constraint: KUL > KShorts > KLL (todos puts, strikes decrecientes hacia OTM)
 
 
-# === PREFILTRO NET CREDIT (Crédito inicial de la estructura) ===
-# Filtra estructuras por crédito neto recibido al abrir (en puntos SPX, valores negativos = crédito)
-PREFILTER_CREDIT_MIN = -40000   # Crédito mínimo aceptable: -40 pts = recibir mínimo $4000 por contrato
-PREFILTER_CREDIT_MAX = 40000    # ! Crédito máximo aceptable: -2 pts = recibir máximo $200 por contrato
-                              # RANGO TÍPICO: [-40, -2] filtra estructuras que dan entre $200 y $4000 de crédito
-                              # NOTA: Valores negativos porque crédito = entrada de dinero
+# === PREFILTRO NET CREDIT (Crédito inicial de la estructura Allantis) ===
+# Allantis: +4P -8P +4P -2C +2C = 20 contratos totales (5x más que Batman)
+# Net credit = +4*P_UL - 8*P_Shorts + 4*P_LL - 2*C_Short + 2*C_Long (en puntos SPX)
+# Valores negativos = crédito recibido (favorable), positivos = débito pagado
+PREFILTER_CREDIT_MIN = -20000.0     # Crédito mínimo: -200 pts = recibir máximo $20,000 total
+PREFILTER_CREDIT_MAX = 20000.0      # Crédito máximo: +200 pts = pagar máximo $20,000 total
+                                  # RANGO AMPLIO inicial para no filtrar agresivamente
+                                  # AJUSTAR según resultados: estructura puede ser crédito o débito
+                                  # Ejemplo: -50 pts = recibir $5,000 | +30 pts = pagar $3,000
 
 # === FILTROS FINALES (Greeks y métricas de riesgo) ===
-DELTA_MIN, DELTA_MAX = -1, 1      # ! Rango de delta total permitido
-                                       # Delta negativo: estructura bajista
-                                       # (0.5, 100): acepta deltas desde ligeramente bajista hasta muy alcista
-THETA_MIN, THETA_MAX = 0, 10000.0  # Theta diario en USD permitido (ganancia por decay temporal)
-                                        # -100.0: pérdida máxima de $100/día por theta negativo
-                                        # 10000.0: sin límite superior (acepta theta positivo alto)
-                                        # Valores típicos para Batman: 2-10 USD/día de ganancia
+# DELTA: Allantis tiene 20 contratos (BWB puts + call calendar)
+# BWB puts: delta negativo (protección bajista), Calls: delta positivo (alcista)
+# Estructura debería ser aproximadamente delta-neutral o ligeramente sesgada
+DELTA_MIN, DELTA_MAX = -0.05, 0.05    # Rango delta total para 20 contratos
+                                       # BWB: ~4*(-0.40) - 8*(-0.30) + 4*(-0.20) = -1.6 + 2.4 - 0.8 = 0
+                                       # Calls: -2*(0.30) + 2*(0.30) = 0
+                                       # Total esperado: cerca de 0, permitir ±50 para variabilidad
 
-# === FILTRO UEL_INF (Upper Earnings Limit Infinita - Pérdida máxima en T1 con spread infinito) ===
-UEL_INF_MIN = -1000000                # UEL infinita mínima en USD (pérdida máxima plana oreja derecha en T1)
-UEL_INF_MAX =  1000000                # UEL infinita máxima en USD
-                                       # Pérdida máxima cuando las cortas T1 vencen y la larga doble T2 sigue viva
-                                       # Fórmula: (K1+K3) - 2·PVK2 - net_cost_pts, luego × 100 (multiplicador SPX)
+# THETA: 20 contratos = theta 5x mayor que Batman
+# Estructura mayormente theta positivo (decay favorable en BWB + calendar)
+THETA_MIN, THETA_MAX = -500.0, 50000.0  # Theta diario en USD
+                                         # Allantis típico: 50-200 USD/día positivo
+                                         # Permitir negativo por si calendar tiene theta negativo en ciertos casos
 
-# ! === FILTRO RATIO_UEL_EARS === Para controlar UEL en función del promedio de orejas
-RATIO_UEL_EARS_MIN = -100000      # Ratio mínimo UEL / Promedio(EarL, EarR)
-RATIO_UEL_EARS_MAX =  1000000      # Ratio máximo UEL / Promedio(EarL, EarR)
-                                       # Fórmula: UEL_inf_USD / ((EarL + EarR) / 2)
+# === FILTRO UEL_INF ===
+# NO APLICA para Allantis (UEL_INF es concepto específico de Batman call butterfly)
+# Allantis usa BWB de puts, no tiene "orejas" ni "death valley" tradicional
+# Deshabilitado mediante rangos amplios
+UEL_INF_MIN = -10000000               # Deshabilitado (rango muy amplio)
+UEL_INF_MAX =  10000000               # Deshabilitado (rango muy amplio)
 
 # === FILTRO PnLDV (Profit & Loss en Death Valley) ===
-FILTER_PNLDV_ENABLED = False          # True: aplica filtro por PnLDV | False: no filtra
-PNLDV_MIN = -1000000                  # PnL mínimo en Death Valley (peor punto del gráfico)
-PNLDV_MAX =  1000000                  # PnL máximo en Death Valley
-                                       # DESHABILITADO: rango muy amplio [-1M, +1M]
+# NO APLICA para Allantis (Death Valley es concepto de Batman butterfly)
+# BWB tiene perfil diferente: máxima ganancia en el centro, pérdidas en extremos
+FILTER_PNLDV_ENABLED = False          # Deshabilitado para Allantis
+PNLDV_MIN = -10000000                 # Rango deshabilitado
+PNLDV_MAX =  10000000                 # Rango deshabilitado
 
-# === FILTRO BQI_ABS (Batman Quality Index Absoluto) ===
-FILTER_BQI_ABS_ENABLED = False         # True: aplica filtro por BQI_ABS | False: no filtra
-BQI_ABS_MIN = 2                       # ! BQI_ABS mínimo aceptable (métrica de calidad estructura)
-BQI_ABS_MAX = 100000                   # BQI_ABS máximo (sin límite superior práctico)
-                                       # FILTRO ACTIVO: solo estructuras con BQI_ABS >= 2
+# === FILTRO AQI (Allantis Quality Index) ===
+# Reemplaza BQI_ABS de Batman - métrica de calidad específica para BWB + Calendar
+# INERTE: Deshabilitado hasta que se defina la fórmula AQI para Allantis
+FILTER_AQI_ABS_ENABLED = False        # Deshabilitado (AQI no implementado)
+AQI_ABS_MIN = 0                       # Métrica mínima (a definir según backtests)
+AQI_ABS_MAX = 100000                  # Sin límite superior
+CALCULATE_AQI = False                 # Control para cálculo de AQI (INERTE)
 
 # === FILTRO NET_CREDIT_DIFF (solo aplica en CSV Copia con mediana T+0) ===
 # Filtra estructuras comparando net_credit vs net_credit_mediana (% diferencia)
@@ -5340,7 +5345,7 @@ def main():
                         parquet_files = []
 
                         # Crear batch_out_path
-                        batch_out_name = f"Batman_V23_LIVE_BETA_{ts_batch}.csv"
+                        batch_out_name = f"ALLANTIS_V1_LIVE_BETA_{ts_batch}.csv"
                         batch_out_path = DESKTOP / safe_filename(batch_out_name)
 
                         # Saltar al bloque de carga
@@ -5405,7 +5410,7 @@ def main():
         chosen_files = random.sample(files_sorted, k=k)
 
         ts_batch = datetime.now(TZ_ES).strftime("%Y%m%d_%H%M%S")
-        batch_out_name = f"Batman_V18_LIVE_BETA{ts_batch}.csv"
+        batch_out_name = f"ALLANTIS_V1_LIVE_BETA{ts_batch}.csv"
         batch_out_path = DESKTOP / safe_filename(batch_out_name)
 
         # Directorio temporal para Parquet incrementales
@@ -5483,55 +5488,59 @@ def main():
 
                 rows=[]
 
-                # ========== PARALELIZACIÓN DE SELECCIÓN DE CANDIDATOS ==========
-                # Preparar todas las tareas de k1 para procesamiento paralelo
+                # ========== PARALELIZACIÓN DE SELECCIÓN DE CANDIDATOS ALLANTIS ==========
+                # Allantis: 5 patas (UL, Shorts, LL puts @ DTE1 + Short/Long calls)
+                # Preparar todas las tareas de k_ul para procesamiento paralelo
                 tasks = []
                 for e1 in exp_A:
-                    calls1, _, _, _ = precache[e1]
-                    strikes1 = sorted(set(calls1["strike"].tolist()))
+                    calls1, puts1, _, _ = precache[e1]
+                    strikes_puts1 = sorted(set(puts1["strike"].tolist()))
+                    strikes_calls1 = sorted(set(calls1["strike"].tolist()))
 
-                    # Indexar calls1 por strike para búsqueda rápida
+                    # Indexar por strike para búsqueda rápida
+                    puts1_idx = puts1.set_index("strike")
                     calls1_idx = calls1.set_index("strike")
 
-                    # Generar candidatos K1 basados en delta
-                    s1_list = gen_k1_candidates_by_delta(
-                        calls1_idx, strikes1, spot, dte_map[e1], r_base,
-                        delta_min=BASE_K1_DELTA_MIN,
-                        delta_max=BASE_K1_DELTA_MAX
+                    # Generar candidatos UL (Upper Line puts) basados en delta
+                    ul_list = gen_ul_put_candidates_by_delta(
+                        puts1_idx, strikes_puts1, spot, dte_map[e1], r_base,
+                        delta_min=UL_PUT_DELTA_MIN,
+                        delta_max=UL_PUT_DELTA_MAX
                     )
 
-                    # Generar candidatos K3 basados en delta
-                    s3_list = gen_k3_candidates_by_delta(
-                        calls1_idx, strikes1, spot, dte_map[e1], r_base,
-                        delta_min=K3_DELTA_MIN,
-                        delta_max=K3_DELTA_MAX
+                    # Generar candidatos Shorts (Short puts) basados en delta
+                    shorts_list = gen_short_put_candidates_by_delta(
+                        puts1_idx, strikes_puts1, spot, dte_map[e1], r_base,
+                        delta_min=SHORT_PUT_DELTA_MIN,
+                        delta_max=SHORT_PUT_DELTA_MAX
                     )
 
-                    if not s1_list or not s3_list:
+                    # Generar candidatos LL (Lower Line puts) basados en delta
+                    ll_list = gen_ll_put_candidates_by_delta(
+                        puts1_idx, strikes_puts1, spot, dte_map[e1], r_base,
+                        delta_min=LL_PUT_DELTA_MIN,
+                        delta_max=LL_PUT_DELTA_MAX
+                    )
+
+                    # Generar candidatos Short Calls @ DTE1 basados en delta
+                    call_list = gen_short_call_candidates_by_delta(
+                        calls1_idx, strikes_calls1, spot, dte_map[e1], r_base,
+                        delta_min=SHORT_CALL_DELTA_MIN,
+                        delta_max=SHORT_CALL_DELTA_MAX
+                    )
+
+                    if not ul_list or not shorts_list or not ll_list or not call_list:
                         continue
 
                     for e2 in exp_B:
                         calls2, _, _, _ = precache[e2]
-                        strikes2 = sorted(set(calls2["strike"].tolist()))
 
-                        # Indexar calls2 por strike para búsqueda rápida
-                        calls2_idx = calls2.set_index("strike")
-
-                        # Generar candidatos K2 basados en delta
-                        s2_list = gen_k2_candidates_by_delta(
-                            calls2_idx, strikes2, spot, dte_map[e2], r_base,
-                            delta_min=K2_DELTA_MIN,
-                            delta_max=K2_DELTA_MAX
-                        )
-
-                        if not s2_list:
-                            continue
-
-                        # Crear tareas para cada k1
-                        for k1 in s1_list:
+                        # Crear tareas para cada k_ul
+                        for k_ul in ul_list:
                             task = (
-                                k1, s2_list, s3_list, e1, e2, dte_map, spot, r_base,
+                                k_ul, shorts_list, ll_list, call_list, e1, e2, dte_map, spot, r_base,
                                 date_es_str, hhmm_es, _hhmm_us, base_idx,
+                                puts1.reset_index(drop=True),   # DataFrame serializable
                                 calls1.reset_index(drop=True),  # DataFrame serializable
                                 calls2.reset_index(drop=True),  # DataFrame serializable
                                 FRAC_SUFFIXES, USE_LIQUIDITY_FILTERS,
@@ -5544,14 +5553,14 @@ def main():
                 if tasks:
                     import os as os_module
                     num_workers = os_module.cpu_count() or 1
-                    print(f"     [PARALLEL] Procesando {len(tasks)} tareas k1 con {num_workers} workers...")
+                    print(f"     [PARALLEL] Procesando {len(tasks)} tareas Allantis con {num_workers} workers...")
 
                     with ProcessPoolExecutor(max_workers=num_workers) as executor:
                         # Iteración lazy sobre resultados (no list())
-                        for result in executor.map(_process_k1_candidate, tasks):
+                        for result in executor.map(_process_allantis_candidate, tasks):
                             rows.extend(result)
 
-                    print(f"     [PARALLEL] Completado. {len(rows)} candidatos generados.")
+                    print(f"     [PARALLEL] Completado. {len(rows)} candidatos Allantis generados.")
 
                 print(f"     Candidatos generados: {len(rows)}")
 
@@ -5643,57 +5652,30 @@ def main():
             if "UEL_inf_USD" in df_chunk.columns:
                 mask &= (df_chunk["UEL_inf_USD"] >= UEL_INF_MIN) & (df_chunk["UEL_inf_USD"] <= UEL_INF_MAX)
 
-            # Prefiltro RATIO_UEL_EARS
-            if "RATIO_UEL_EARS" in df_chunk.columns:
-                mask &= (df_chunk["RATIO_UEL_EARS"] >= RATIO_UEL_EARS_MIN) & (df_chunk["RATIO_UEL_EARS"] <= RATIO_UEL_EARS_MAX)
+            # RATIO_UEL_EARS eliminado - no aplica para Allantis
 
             # Aplicar máscara de prefiltros básicos
             df_chunk = df_chunk[mask]
             del mask
 
-            # ========== FASE 2: Calcular BQI_ABS (si no existe) ==========
-            if not df_chunk.empty and {"PnLDV","EarL","EarR"}.issubset(df_chunk.columns):
-                if "BQI_ABS" not in df_chunk.columns:
-                    # Constantes para normalización (idénticas a las del cálculo principal)
-                    EPS = 1e-6
-                    Wv  = 1.0
-                    Wa  = 0.35
-                    OFFSET_BASE = 1000.0
-                    SCALE_FACTOR = 10.0
+            # ========== FASE 2: Calcular AQI_ABS (INERTE - deshabilitado para Allantis) ==========
+            # BQI_ABS era específico de Batman butterfly. Para Allantis BWB+Calendar,
+            # se necesita una nueva métrica AQI (Allantis Quality Index) - a desarrollar
+            if CALCULATE_AQI and not df_chunk.empty:
+                # TODO: Implementar cálculo de AQI cuando se defina la fórmula
+                # Por ahora, INERTE - no se calcula nada
+                pass
 
-                    earL  = pd.to_numeric(df_chunk["EarL"], errors="coerce")
-                    earR  = pd.to_numeric(df_chunk["EarR"], errors="coerce")
-                    pnldv = pd.to_numeric(df_chunk["PnLDV"], errors="coerce")
-
-                    EL = np.clip(earL, 0, None)
-                    ER = np.clip(earR, 0, None)
-                    EarScore = np.sqrt(EL * ER)
-                    ValleyDepth = np.clip(-pnldv, 0, None)
-                    Asym = np.abs(EL - ER)
-
-                    BQI_ABS_pos = OFFSET_BASE + (pnldv / SCALE_FACTOR)
-                    BQI_ABS_neg = EarScore / (EPS + Wv*ValleyDepth + Wa*Asym)
-                    BQI_ABS_neg = np.minimum(BQI_ABS_neg, OFFSET_BASE - 1.0)
-                    BQI_ABS = np.where(pnldv >= 0, BQI_ABS_pos, BQI_ABS_neg)
-
-                    df_chunk["BQI_ABS"] = pd.to_numeric(BQI_ABS, errors="coerce")
-                    df_chunk["BQR_1000"] = np.rint(df_chunk["BQI_ABS"] * 1000.0).astype("Int64")
-                    df_chunk["EarScore"] = EarScore
-                    df_chunk["Asym"] = Asym
-
-                    # Liberar memoria
-                    del earL, earR, pnldv, EL, ER, EarScore, ValleyDepth, Asym, BQI_ABS_pos, BQI_ABS_neg, BQI_ABS
-
-            # ========== FASE 3: Filtros avanzados (PnLDV, BQI_ABS) ==========
+            # ========== FASE 3: Filtros avanzados (PnLDV, AQI_ABS) ==========
             mask_advanced = pd.Series(True, index=df_chunk.index)
 
-            # Filtro PnLDV (si está habilitado)
+            # Filtro PnLDV (si está habilitado) - DESHABILITADO para Allantis
             if FILTER_PNLDV_ENABLED and "PnLDV" in df_chunk.columns:
                 mask_advanced &= df_chunk["PnLDV"].notna() & (df_chunk["PnLDV"] >= PNLDV_MIN) & (df_chunk["PnLDV"] <= PNLDV_MAX)
 
-            # Filtro BQI_ABS (si está habilitado)
-            if FILTER_BQI_ABS_ENABLED and "BQI_ABS" in df_chunk.columns:
-                mask_advanced &= df_chunk["BQI_ABS"].notna() & (df_chunk["BQI_ABS"] >= BQI_ABS_MIN) & (df_chunk["BQI_ABS"] <= BQI_ABS_MAX)
+            # Filtro AQI_ABS (INERTE - deshabilitado)
+            if FILTER_AQI_ABS_ENABLED and "AQI_ABS" in df_chunk.columns:
+                mask_advanced &= df_chunk["AQI_ABS"].notna() & (df_chunk["AQI_ABS"] >= AQI_ABS_MIN) & (df_chunk["AQI_ABS"] <= AQI_ABS_MAX)
 
             # Aplicar filtros avanzados
             df_chunk = df_chunk[mask_advanced]
@@ -6028,9 +6010,7 @@ def main():
         stats = get_filter_stats(df, "UEL_inf_USD", UEL_INF_MIN, UEL_INF_MAX)
         print(f"[✓] UEL_inf_USD ya prefiltrado: {format_filter_log('UEL_inf_USD', UEL_INF_MIN, UEL_INF_MAX, len(df), len(df), stats)}")
 
-        # Verificar RATIO_UEL_EARS (ya filtrado)
-        stats = get_filter_stats(df, "RATIO_UEL_EARS", RATIO_UEL_EARS_MIN, RATIO_UEL_EARS_MAX)
-        print(f"[✓] RATIO_UEL_EARS ya prefiltrado: {format_filter_log('RATIO_UEL_EARS', RATIO_UEL_EARS_MIN, RATIO_UEL_EARS_MAX, len(df), len(df), stats)}")
+        # RATIO_UEL_EARS eliminado - no aplica para Allantis
 
         # Verificar PnLDV (ya filtrado si estaba habilitado)
         if "PnLDV" in df.columns:
@@ -6108,10 +6088,10 @@ def main():
     if df.empty:
         print("\nNo hay filas tras filtros; no se aplica orden. CSV vacío.")
     else:
-        choice = "bqi"  # Elige entre: ["bqi", "bqr", "pnldv", "delta", "theta", "dv"]
+        choice = "theta"  # Por defecto para Allantis: ["theta", "delta", "ff_atm", "ratio_bwb", "net_credit"]
 
         print(f"\n{'─'*70}")
-        print(f"ORDENAMIENTO DE CANDIDATOS")
+        print(f"ORDENAMIENTO DE CANDIDATOS ALLANTIS")
         print(f"{'─'*70}")
         print(f"[INFO] Criterio seleccionado: {choice}")
         print(f"[INFO] Estrategia: {sort_strategy}")
@@ -6120,31 +6100,32 @@ def main():
             import time
             start_time = time.time()
 
-            # Determinar columnas de ordenamiento según criterio
+            # Determinar columnas de ordenamiento según criterio (adaptado para Allantis)
             if choice in ("theta", "t", "θ", "theta_total"):
-                sort_cols = ["theta_total","BQI_ABS","PnLDV"]
-                sort_asc = [False,False,False]
-                used = "theta_total → BQI_ABS → PnLDV"
+                sort_cols = ["theta_total", "FF_ATM", "RATIO_BWB"]
+                sort_asc = [False, False, False]
+                used = "theta_total → FF_ATM → RATIO_BWB"
             elif choice in ("delta", "d", "delta_total"):
-                sort_cols = ["delta_total","BQI_ABS","PnLDV"]
-                sort_asc = [False,False,False]
-                used = "delta_total → BQI_ABS → PnLDV"
-            elif choice in ("dv","death","valley"):
-                sort_cols = ["Death valley","BQI_ABS","PnLDV"]
-                sort_asc = [True,False,False]
-                used = "Death valley → BQI_ABS → PnLDV"
-            elif choice in ("pnldv","pnl","pnl_dv"):
-                sort_cols = ["PnLDV","BQI_ABS","EarScore","Asym"]
-                sort_asc = [False,False,False,True]
-                used = "PnLDV → BQI_ABS → EarScore → Asym"
-            elif choice in ("bqr","bqi1000"):
-                sort_cols = ["BQR_1000","PnLDV","EarScore","Asym"]
-                sort_asc = [False,False,False,True]
-                used = "BQR_1000 → PnLDV → EarScore → Asym"
+                sort_cols = ["delta_total", "theta_total", "FF_ATM"]
+                sort_asc = [False, False, False]
+                used = "delta_total → theta_total → FF_ATM"
+            elif choice in ("ff", "ff_atm", "forward_factor"):
+                sort_cols = ["FF_ATM", "theta_total", "RATIO_BWB"]
+                sort_asc = [False, False, False]
+                used = "FF_ATM → theta_total → RATIO_BWB"
+            elif choice in ("ratio", "ratio_bwb", "bwb"):
+                sort_cols = ["RATIO_BWB", "theta_total", "FF_ATM"]
+                sort_asc = [False, False, False]
+                used = "RATIO_BWB → theta_total → FF_ATM"
+            elif choice in ("credit", "net_credit", "nc"):
+                sort_cols = ["net_credit", "theta_total", "FF_ATM"]
+                sort_asc = [True, False, False]  # Menor net_credit primero (más crédito recibido)
+                used = "net_credit → theta_total → FF_ATM"
             else:
-                sort_cols = ["BQI_ABS","PnLDV","EarScore","Asym"]
-                sort_asc = [False,False,False,True]
-                used = "BQI_ABS → PnLDV → EarScore → Asym"
+                # Default: theta_total
+                sort_cols = ["theta_total", "FF_ATM", "RATIO_BWB"]
+                sort_asc = [False, False, False]
+                used = "theta_total → FF_ATM → RATIO_BWB"
 
             # Ejecutar ordenamiento según estrategia
             if sort_strategy == "in_memory":
@@ -6567,7 +6548,7 @@ def main():
             failed_count = 0
 
             with ProcessPoolExecutor() as executor:
-                futures = {executor.submit(_process_one_fwd_batman, arg): arg[0] for arg in worker_args}
+                futures = {executor.submit(_process_one_fwd_allantis, arg): arg[0] for arg in worker_args}
 
                 for future in futures:
                     idx = futures[future]
@@ -6595,32 +6576,29 @@ def main():
             print(f"  Columnas generadas: PnL_fwd_pts_*_mediana, PnL_fwd_pct_*_mediana")
             print(f"{'='*70}\n")
 
-    # Reordenación de columnas (mismo orden que CSV Copia)
+    # Reordenación de columnas (adaptado para Allantis)
     if not df.empty:
         preferred_order = [
             # Columnas principales en orden específico
             "dia",
             "url",
-            "BQI_ABS",
             "FF_ATM",
-            "FF_BAT",
-            "RATIO_BATMAN",
+            "RATIO_BWB",              # Reemplaza RATIO_BATMAN
             "net_credit",
             "DTE1/DTE2",
-            "k1",
-            "k2",
-            "k3",
+            "k_ul",                   # Strikes de Allantis (5 patas)
+            "k_shorts",
+            "k_ll",
+            "k_call",
             "delta_total",
             "theta_total",
-            "Death valley",
-            "PnLDV",
-            "EarL",
-            "EarR",
-            "UEL_inf_USD",
-            "RATIO_UEL_EARS",
-            "BQR_1000",
-            "EarScore",
-            "Asym",
+            # IVs de las 5 patas
+            "iv_ul",
+            "iv_shorts",
+            "iv_ll",
+            "iv_c_short",
+            "iv_c_long",
+            # Métricas Batman eliminadas (no aplican a BWB)
         ]
 
         # Separar columnas: prioritarias, fwd/root/pnl8000 (al final), y resto (medio)
@@ -6640,7 +6618,8 @@ def main():
     print(df.head(SHOW_MAX).to_string(index=False))
 
     # Exportación (numérico limpio para ordenar bien en CSV)
-    num_cols = ["BQI_ABS","BQR_1000","PnLDV","EarL","EarR","UEL_inf_USD","RATIO_UEL_EARS","Death valley","delta_total","theta_total","net_credit"]
+    # RATIO_UEL_EARS eliminado - no aplica para Allantis
+    num_cols = ["BQI_ABS","BQR_1000","PnLDV","EarL","EarR","UEL_inf_USD","Death valley","delta_total","theta_total","net_credit"]
     for c in num_cols:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
@@ -7047,31 +7026,23 @@ def main():
             # ============================================================
             # REORDENAMIENTO DE COLUMNAS según especificación
             # ============================================================
-            # Definir orden deseado
+            # Definir orden deseado (adaptado para Allantis)
             columnas_ordenadas = [
                 # Columnas principales en orden específico
                 "dia",
                 "url",
-                "BQI_ABS",
                 "FF_ATM",
-                "FF_BAT",
-                "RATIO_BATMAN",
+                "RATIO_BWB",              # Reemplaza RATIO_BATMAN para Allantis
                 "net_credit",
                 "DTE1/DTE2",
-                "k1",
-                "k2",
-                "k3",
+                "k_ul",                   # Strikes de Allantis (5 patas)
+                "k_shorts",
+                "k_ll",
+                "k_call",
                 "delta_total",
                 "theta_total",
-                "Death valley",
-                "PnLDV",
-                "EarL",
-                "EarR",
-                "UEL_inf_USD",
-                "RATIO_UEL_EARS",
-                "BQR_1000",
-                "EarScore",
-                "Asym",
+                # Métricas de Batman/BQI eliminadas - no aplican a Allantis
+                # "Death valley", "PnLDV", "EarL", "EarR", "UEL_inf_USD" eliminados
             ]
 
             # Agregar columnas que existen pero no están en la lista (el resto...)
