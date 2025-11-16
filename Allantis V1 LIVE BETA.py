@@ -187,14 +187,14 @@ ORDER_PRE_FWD_GLOBAL = False              # True: ordena TODAS las estructuras g
                                           # False: ordena por archivo (no recomendado)
 RANKING_MODE = "theta_total"             # Métrica de ranking para ordenar estructuras Allantis
                                           # "theta_total": Theta total (por defecto para Allantis)
-                                          # "AQI_ABS": Allantis Quality Index (INERTE - a desarrollar)
+                                          # "AQI": Allantis Quality Index (balance entre LEL, UEL, picos, valle, theta, MASTER_DISTANCE)
 
 # ================== UMBRALES PARA GRÁFICOS FILTRADOS (Subconjuntos de Alta Calidad) ==================
 # Controla qué estructuras se incluyen en los gráficos 3A/3B, 4A/4B, 5A/5B y 6A/6B
 
-FILTER_AQI_ABS_THRESHOLD = 2.0        # Umbral para gráficos de AQI_ABS (Allantis Quality Index - INERTE)
-                                       # DESHABILITADO: AQI no está implementado aún
-                                       # A desarrollar cuando se defina la métrica de calidad para BWB+Calendar
+FILTER_AQI_THRESHOLD = 2.0            # Umbral para gráficos de AQI (Allantis Quality Index)
+                                       # AQI balancea: LEL, UEL, picos BWB/CCAL, valle, theta, MASTER_DISTANCE
+                                       # Valores típicos: 1-5 (mayor es mejor)
 
 FILTER_FF_BAT_THRESHOLD = 0.1         # Umbral para gráficos de FF_BAT (Forward Factor Batman)
                                        # Gráficos 6A/6B mostrarán solo estructuras con FF_BAT > este valor
@@ -344,12 +344,12 @@ PNLDV_MIN = -10000000                 # Rango deshabilitado
 PNLDV_MAX =  10000000                 # Rango deshabilitado
 
 # === FILTRO AQI (Allantis Quality Index) ===
-# Reemplaza BQI_ABS de Batman - métrica de calidad específica para BWB + Calendar
-# INERTE: Deshabilitado hasta que se defina la fórmula AQI para Allantis
-FILTER_AQI_ABS_ENABLED = False        # Deshabilitado (AQI no implementado)
-AQI_ABS_MIN = 0                       # Métrica mínima (a definir según backtests)
-AQI_ABS_MAX = 100000                  # Sin límite superior
-CALCULATE_AQI = False                 # Control para cálculo de AQI (INERTE)
+# Métrica de calidad específica para BWB + Calendar
+# Balancea LEL, UEL, picos BWB/CCAL, valle, theta, MASTER_DISTANCE
+FILTER_AQI_ENABLED = True             # True: aplica filtro por AQI | False: no filtra
+AQI_MIN = 0.5                         # AQI mínimo aceptable (valores típicos: 1-5)
+AQI_MAX = 100000                      # Sin límite superior
+CALCULATE_AQI = True                  # Control para cálculo de AQI
 
 # === FILTRO NET_CREDIT_DIFF (solo aplica en CSV Copia con mediana T+0) ===
 # Filtra estructuras comparando net_credit vs net_credit_mediana (% diferencia)
@@ -2524,6 +2524,91 @@ def compute_allantis_metrics(spot, r_base, exp1, dte1, k_ul, k_shorts, k_ll, k_c
         UEL_pts = -net_debit + 2*float(k_call)*(1 - math.exp(-r2*tau))
         UEL_USD = UEL_pts * 100.0
 
+    # --- 11. MASTER_DISTANCE - Distancia entre breakevens ---
+    # Diferencia entre BreakEvenBWB1_strike y BreakEvenCCAL2_strike
+    MASTER_DISTANCE = None
+    if BreakEvenBWB1_strike is not None and BreakEvenCCAL2_strike is not None:
+        MASTER_DISTANCE = BreakEvenBWB1_strike - BreakEvenCCAL2_strike
+
+    # --- 12. AQI (Allantis Quality Index) - Indicador de calidad global ---
+    # Similar a BQI_ABS de Batman, pero adaptado a métricas de Allantis
+    # Premia el balance entre todas las métricas (no solo tener algunas muy buenas)
+    AQI = None
+
+    # Solo calcular si tenemos todas las métricas necesarias
+    if (LEL_pts is not None and UEL_pts is not None and
+        PICOBWB_PnL_pts is not None and PICOCCAL_PnL_pts is not None and
+        VALLE_PnL_pts is not None and theta_total is not None and
+        MASTER_DISTANCE is not None):
+
+        # Constantes de normalización y pesos
+        # Estos valores se pueden ajustar según la experiencia
+        EPS = 1e-6  # Epsilon para evitar división por cero
+
+        # Pesos (theta tiene peso levemente superior: 1.2 vs 1.0 para el resto)
+        W_LEL = 1.0
+        W_UEL = 1.0
+        W_PICO_BWB = 1.0
+        W_PICO_CCAL = 1.0
+        W_VALLE = 1.0
+        W_THETA = 1.2  # Peso levemente superior para theta
+        W_MASTER_DIST = 1.0
+
+        # Normalizar cada métrica a escala [0, ∞) donde mayor es mejor
+        # LEL: normalizar usando un valor base típico (ej: 0 es malo, 5+ es bueno)
+        LEL_norm = max(0, LEL_pts) / (5.0 + EPS)
+
+        # UEL: normalizar usando un valor base típico
+        UEL_norm = max(0, UEL_pts) / (10.0 + EPS)
+
+        # PICO BWB: normalizar (valores típicos 0-10)
+        PICO_BWB_norm = max(0, PICOBWB_PnL_pts) / (5.0 + EPS)
+
+        # PICO CCAL: normalizar (valores típicos 0-10)
+        PICO_CCAL_norm = max(0, PICOCCAL_PnL_pts) / (5.0 + EPS)
+
+        # VALLE: convertir para que menos negativo sea mejor
+        # Si VALLE es -10, es peor que si es -2. Si es positivo, es excelente.
+        # Usamos: (VALLE + offset) / scale para normalizarlo
+        # Asumiendo que valles típicos están entre -20 y +5
+        VALLE_norm = (VALLE_PnL_pts + 20.0) / (10.0 + EPS)
+        VALLE_norm = max(0, VALLE_norm)  # Asegurar no negativo
+
+        # Theta: normalizar (valores típicos 0-50 en valor absoluto)
+        theta_norm = max(0, theta_total) / (20.0 + EPS)
+
+        # MASTER_DISTANCE: normalizar (valores típicos 0-200)
+        MASTER_DIST_norm = max(0, MASTER_DISTANCE) / (50.0 + EPS)
+
+        # Calcular media geométrica ponderada
+        # Formula: AQI = (∏ metric_i^w_i)^(1/Σw_i)
+        # Esto penaliza fuertemente tener alguna métrica muy baja
+
+        sum_weights = W_LEL + W_UEL + W_PICO_BWB + W_PICO_CCAL + W_VALLE + W_THETA + W_MASTER_DIST
+
+        # Para evitar log(0), añadimos un pequeño offset a cada métrica
+        offset = 0.1
+
+        try:
+            product_term = (
+                ((LEL_norm + offset) ** W_LEL) *
+                ((UEL_norm + offset) ** W_UEL) *
+                ((PICO_BWB_norm + offset) ** W_PICO_BWB) *
+                ((PICO_CCAL_norm + offset) ** W_PICO_CCAL) *
+                ((VALLE_norm + offset) ** W_VALLE) *
+                ((theta_norm + offset) ** W_THETA) *
+                ((MASTER_DIST_norm + offset) ** W_MASTER_DIST)
+            )
+
+            # Aplicar raíz (1/sum_weights)
+            AQI = product_term ** (1.0 / sum_weights)
+
+            # Escalar a rango más interpretable (multiplicar por factor para que valores típicos estén en 1-10)
+            AQI = AQI * 2.0
+
+        except (ValueError, ZeroDivisionError, OverflowError):
+            AQI = None
+
     # Construir output
     out = {
         "delta_total": round(delta_total, 6),
@@ -2617,6 +2702,12 @@ def compute_allantis_metrics(spot, r_base, exp1, dte1, k_ul, k_shorts, k_ll, k_c
         "PICOCCAL_strike": round(PICOCCAL_strike, 2) if PICOCCAL_strike is not None else None,
         "PICOCCAL_PnL_pts": round(PICOCCAL_PnL_pts, 2) if PICOCCAL_PnL_pts is not None else None,
         "PICOCCAL_PnL_USD": round(PICOCCAL_PnL_USD, 2) if PICOCCAL_PnL_USD is not None else None,
+
+        # MASTER_DISTANCE - Distancia entre breakevens BWB y CCAL
+        "MASTER_DISTANCE": round(MASTER_DISTANCE, 2) if MASTER_DISTANCE is not None else None,
+
+        # AQI - Allantis Quality Index
+        "AQI": round(AQI, 4) if AQI is not None else None,
     }
 
     return out
@@ -5693,24 +5784,21 @@ def main():
             df_chunk = df_chunk[mask]
             del mask
 
-            # ========== FASE 2: Calcular AQI_ABS (INERTE - deshabilitado para Allantis) ==========
-            # BQI_ABS era específico de Batman butterfly. Para Allantis BWB+Calendar,
-            # se necesita una nueva métrica AQI (Allantis Quality Index) - a desarrollar
-            if CALCULATE_AQI and not df_chunk.empty:
-                # TODO: Implementar cálculo de AQI cuando se defina la fórmula
-                # Por ahora, INERTE - no se calcula nada
-                pass
+            # ========== FASE 2: AQI (Allantis Quality Index) ==========
+            # AQI ya se calcula en process_one_allantis() y está disponible en el CSV
+            # Balancea LEL, UEL, picos BWB/CCAL, valle, theta, MASTER_DISTANCE
+            # No es necesario calcular nada aquí - AQI viene en los datos
 
-            # ========== FASE 3: Filtros avanzados (PnLDV, AQI_ABS) ==========
+            # ========== FASE 3: Filtros avanzados (PnLDV, AQI) ==========
             mask_advanced = pd.Series(True, index=df_chunk.index)
 
             # Filtro PnLDV (si está habilitado) - DESHABILITADO para Allantis
             if FILTER_PNLDV_ENABLED and "PnLDV" in df_chunk.columns:
                 mask_advanced &= df_chunk["PnLDV"].notna() & (df_chunk["PnLDV"] >= PNLDV_MIN) & (df_chunk["PnLDV"] <= PNLDV_MAX)
 
-            # Filtro AQI_ABS (INERTE - deshabilitado)
-            if FILTER_AQI_ABS_ENABLED and "AQI_ABS" in df_chunk.columns:
-                mask_advanced &= df_chunk["AQI_ABS"].notna() & (df_chunk["AQI_ABS"] >= AQI_ABS_MIN) & (df_chunk["AQI_ABS"] <= AQI_ABS_MAX)
+            # Filtro AQI (Allantis Quality Index)
+            if FILTER_AQI_ENABLED and "AQI" in df_chunk.columns:
+                mask_advanced &= df_chunk["AQI"].notna() & (df_chunk["AQI"] >= AQI_MIN) & (df_chunk["AQI"] <= AQI_MAX)
 
             # Aplicar filtros avanzados
             df_chunk = df_chunk[mask_advanced]
@@ -6148,6 +6236,10 @@ def main():
                 sort_cols = ["net_credit", "theta_total"]
                 sort_asc = [True, False]  # Menor net_credit primero (más crédito recibido)
                 used = "net_credit → theta_total"
+            elif choice in ("aqi", "AQI", "allantis_quality"):
+                sort_cols = ["AQI", "theta_total"]
+                sort_asc = [False, False]  # Mayor AQI primero (mejor calidad)
+                used = "AQI → theta_total"
             else:
                 # Default: theta_total
                 sort_cols = ["theta_total", "delta_total"]
