@@ -66,7 +66,7 @@ matplotlib.use('Agg')  # Backend sin GUI para guardar gráficos
 from pathlib import Path
 from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Optional, Any
 import logging
@@ -185,7 +185,7 @@ FWD_PLOT_ENABLED = False  # True: genera gráficos PNG con promedios de PnL_fwd_
 # Orden global pre-FWD (ranking de estructuras antes de aplicar filtros FWD)
 ORDER_PRE_FWD_GLOBAL = False              # True: ordena TODAS las estructuras globalmente antes de FWD
                                           # False: ordena por archivo (no recomendado)
-RANKING_MODE = "theta_total"             # Métrica de ranking para ordenar estructuras Allantis
+RANKING_MODE = "AQI"             # Métrica de ranking para ordenar estructuras Allantis
                                           # "theta_total": Theta total (por defecto para Allantis)
                                           # "AQI": Allantis Quality Index (balance entre LEL, UEL, picos, valle, theta, MASTER_DISTANCE)
 
@@ -5468,7 +5468,7 @@ def main():
                         parquet_files = []
 
                         # Crear batch_out_path
-                        batch_out_name = f"ALLANTIS_V1_LIVE_BETA_{ts_batch}.csv"
+                        batch_out_name = f"ALLANTIS_LIVE_BETA_{ts_batch}.csv"
                         batch_out_path = DESKTOP / safe_filename(batch_out_name)
 
                         # Saltar al bloque de carga
@@ -5677,12 +5677,16 @@ def main():
                 if tasks:
                     import os as os_module
                     num_workers = os_module.cpu_count() or 1
-                    print(f"     [PARALLEL] Procesando {len(tasks)} tareas Allantis con {num_workers} workers...")
+                    total_tasks = len(tasks)
+                    print(f"     [PARALLEL] Procesando {total_tasks} tareas Allantis con {num_workers} workers...")
 
                     with ProcessPoolExecutor(max_workers=num_workers) as executor:
                         # Iteración lazy sobre resultados (no list())
-                        for result in executor.map(_process_allantis_candidate, tasks):
+                        for task_idx, result in enumerate(executor.map(_process_allantis_candidate, tasks), start=1):
                             rows.extend(result)
+                            if task_idx % max(1, total_tasks // 10) == 0 or task_idx == total_tasks:
+                                progress_pct = 100 * task_idx / total_tasks
+                                print(f"     [PARALLEL] Progreso candidatos: {task_idx}/{total_tasks} ({progress_pct:.1f}%)")
 
                     print(f"     [PARALLEL] Completado. {len(rows)} candidatos Allantis generados.")
 
@@ -5707,11 +5711,15 @@ def main():
                 mem_mb = df_day.memory_usage(deep=True).sum() / 1024**2
                 print(f"     [STREAM] Volcado incremental: {parquet_path.name} ({len(df_day)} filas, {mem_mb:.1f} MB)")
 
-                # Liberar memoria
-                del df_day
-                del rows
-            else:
-                print(f"     [STREAM] Sin candidatos para este día, no se genera Parquet.")
+            # Liberar memoria
+            del df_day
+            del rows
+        else:
+            print(f"     [STREAM] Sin candidatos para este día, no se genera Parquet.")
+
+        # Progreso global por archivo procesado en modo normal
+        overall_progress = 100 * pick_idx / k
+        print(f"[PROGRESO] Archivos procesados: {pick_idx}/{k} ({overall_progress:.1f}%)")
 
     # ============================================================
     # CONSOLIDACIÓN INCREMENTAL: Filtrar y escribir sin acumular en RAM
@@ -6661,15 +6669,16 @@ def main():
                 worker_args.append(args_tuple)
 
             # Paralelización con ProcessPoolExecutor
-            print(f"[FWD INTRADAY MEDIANA 14×30min] Lanzando {len(worker_args)} tareas en paralelo...")
+            print(f"[FWD INTRADAY MEDIANA 14x30min] Lanzando {len(worker_args)} tareas en paralelo...")
             print(f"[FWD] Evaluando estructura en {len(FWD_INTRADAY_TIMESTAMPS)} timestamps por ventana: {FWD_INTRADAY_TIMESTAMPS}")
             completed_count = 0
             failed_count = 0
+            total_fwd_tasks = len(worker_args)
 
             with ProcessPoolExecutor() as executor:
                 futures = {executor.submit(_process_one_fwd_allantis, arg): arg[0] for arg in worker_args}
 
-                for future in futures:
+                for processed_idx, future in enumerate(as_completed(futures), start=1):
                     idx = futures[future]
                     try:
                         result = future.result(timeout=60)
@@ -6679,9 +6688,6 @@ def main():
                             for col_name, col_value in result['fwd_data'].items():
                                 df.at[idx, col_name] = col_value
                             completed_count += 1
-
-                            if completed_count % 10 == 0:
-                                print(f"[FWD] Progreso: {completed_count}/{len(worker_args)} completados...")
                         else:
                             failed_count += 1
 
@@ -6689,7 +6695,11 @@ def main():
                         print(f"[FWD] Error procesando índice {idx}: {e}")
                         failed_count += 1
 
-            print(f"\n[FWD INTRADAY MEDIANA 14×30min] Cálculo completado:")
+                    if processed_idx % max(1, total_fwd_tasks // 10) == 0 or processed_idx == total_fwd_tasks:
+                        progress_pct = 100 * processed_idx / total_fwd_tasks
+                        print(f"[FWD] Progreso: {processed_idx}/{total_fwd_tasks} ({progress_pct:.1f}%)")
+
+            print(f"\n[FWD INTRADAY MEDIANA 14x30min] Cálculo completado:")
             print(f"  ✓ Exitosos: {completed_count}")
             print(f"  ✗ Fallidos: {failed_count}")
             print(f"  Columnas generadas: PnL_fwd_pts_*_mediana, PnL_fwd_pct_*_mediana")
