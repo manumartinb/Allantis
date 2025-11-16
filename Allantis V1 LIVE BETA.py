@@ -2506,6 +2506,174 @@ def compute_allantis_metrics(spot, r_base, exp1, dte1, k_ul, k_shorts, k_ll, k_c
     else:
         ratio_bwb = np.nan
 
+    # ================== CÁLCULO DE PUNTOS GEOMÉTRICOS ALLANTIS @ VENCIMIENTO DTE1 ==================
+    # Estructura: BWB de Puts + Call Calendar
+    # Puntos: LEL, PuntoLEL, BreakEvenBWB1, PICOBWB, BreakEvenBWB2, VALLE, BreakEvenCCAL1, PICOCCAL, BreakEvenCCAL2, UEL
+
+    # Convertir net_credit a débito para cálculos (convención: débito positivo)
+    # net_credit > 0 significa pagamos débito, net_credit < 0 significa recibimos crédito
+    net_debit = net_credit  # En puntos SPX
+
+    # --- 1. LEL (Lower Expiration Line) - Asíntota inferior ---
+    # Cuando S < k_ll, todas las puts están ITM
+    # PnL = 4·(k_ul - S) - 8·(k_shorts - S) + 4·(k_ll - S) - net_debit
+    #     = 4k_ul - 8k_shorts + 4k_ll - net_debit (constante)
+    LEL_pts = 4*float(k_ul) - 8*float(k_shorts) + 4*float(k_ll) - net_debit
+    LEL_USD = LEL_pts * 100.0  # Convertir a USD
+
+    # --- 2. PuntoLEL - Punto de inflexión donde comienza el ascenso ---
+    # Ubicado en S = k_ll
+    PuntoLEL_strike = float(k_ll)
+    PuntoLEL_PnL_pts = LEL_pts  # Mismo valor que LEL
+    PuntoLEL_PnL_USD = LEL_USD
+
+    # --- 3. BreakEvenBWB1 - Primer breakeven de la BWB ---
+    # En región k_ll < S < k_shorts: PnL = (4k_ul - 8k_shorts - net_debit) + 4S
+    # Resolver: (4k_ul - 8k_shorts - net_debit) + 4S = 0
+    # S = (8k_shorts - 4k_ul + net_debit) / 4
+    BreakEvenBWB1_strike = None
+    numerator_be1 = 8*float(k_shorts) - 4*float(k_ul) + net_debit
+    if numerator_be1 >= 0:  # Solo válido si S >= 0
+        be1_candidate = numerator_be1 / 4.0
+        # Verificar que está en rango válido: k_ll < S < k_shorts
+        if float(k_ll) < be1_candidate < float(k_shorts):
+            BreakEvenBWB1_strike = be1_candidate
+
+    # --- 4. PICOBWB - Máximo de la BWB ---
+    # Ubicado en S = k_shorts
+    PICOBWB_strike = float(k_shorts)
+    # PnL = 4·(k_ul - k_shorts) - net_debit
+    PICOBWB_PnL_pts = 4*(float(k_ul) - float(k_shorts)) - net_debit
+    PICOBWB_PnL_USD = PICOBWB_PnL_pts * 100.0
+
+    # --- 5. BreakEvenBWB2 - Segundo breakeven de la BWB ---
+    # En región k_shorts < S < k_ul: PnL = 4k_ul - 4S - net_debit
+    # Resolver: 4k_ul - 4S - net_debit = 0
+    # S = k_ul - net_debit/4
+    BreakEvenBWB2_strike = None
+    be2_candidate = float(k_ul) - net_debit / 4.0
+    # Verificar que está en rango válido: k_shorts < S < k_ul
+    if float(k_shorts) < be2_candidate < float(k_ul):
+        BreakEvenBWB2_strike = be2_candidate
+
+    # --- 6. VALLE (PnLDVAllantis) - Mínimo entre BWB y Calendar Call ---
+    # En región S >= k_ul: PnL_BWB = -net_debit (plana)
+    # PnL_CCAL = 2·BS_Call(S, k_call, τ, r2, σ_call)
+    # Valle ocurre donde la suma es mínima
+
+    # Función auxiliar para calcular PnL total en un precio S
+    def pnl_total_at_S(S, k_ul_f, k_shorts_f, k_ll_f, k_call_f, tau_f, r2_f, iv_call_f, net_debit_f):
+        """Calcula PnL total de Allantis en precio S al vencimiento DTE1"""
+        # PnL BWB de Puts
+        if S < k_ll_f:
+            pnl_bwb = 4*k_ul_f - 8*k_shorts_f + 4*k_ll_f - net_debit_f
+        elif S < k_shorts_f:
+            pnl_bwb = (4*k_ul_f - 8*k_shorts_f - net_debit_f) + 4*S
+        elif S < k_ul_f:
+            pnl_bwb = 4*k_ul_f - 4*S - net_debit_f
+        else:
+            pnl_bwb = -net_debit_f
+
+        # PnL Call Calendar
+        if tau_f > 0 and iv_call_f is not None and not math.isnan(iv_call_f) and iv_call_f > 0:
+            # Long call @ DTE2 sigue viva con tiempo restante τ
+            long_call_value = bs_call_price(S, k_call_f, tau_f, r2_f, iv_call_f, q=0.0)
+            # Short call @ DTE1 ha vencido
+            short_call_payoff = max(S - k_call_f, 0.0)
+            pnl_ccal = 2*long_call_value - 2*short_call_payoff
+        else:
+            pnl_ccal = 0.0
+
+        return pnl_bwb + pnl_ccal
+
+    # Buscar valle entre k_ul y k_call usando búsqueda numérica
+    VALLE_strike = None
+    VALLE_PnL_pts = None
+    VALLE_PnL_USD = None
+
+    if tau > 0 and iv_c_long is not None and not math.isnan(iv_c_long) and iv_c_long > 0:
+        # Rango de búsqueda del valle: [k_ul, k_call]
+        if float(k_ul) < float(k_call):
+            # Muestrear 100 puntos en el rango
+            search_range = np.linspace(float(k_ul), float(k_call), 100)
+            pnl_values = [pnl_total_at_S(s, float(k_ul), float(k_shorts), float(k_ll),
+                                         float(k_call), tau, r2, float(iv_c_long), net_debit)
+                         for s in search_range]
+            min_idx = np.argmin(pnl_values)
+            VALLE_strike = search_range[min_idx]
+            VALLE_PnL_pts = pnl_values[min_idx]
+            VALLE_PnL_USD = VALLE_PnL_pts * 100.0
+
+    # --- 7. BreakEvenCCAL1 - Primer breakeven del Call Calendar ---
+    # Buscar raíz de PnL_Total(S) = 0 en región [VALLE, k_call]
+    BreakEvenCCAL1_strike = None
+
+    if VALLE_strike is not None and tau > 0 and iv_c_long is not None and not math.isnan(iv_c_long):
+        from scipy.optimize import brentq
+        try:
+            # Definir función objetivo
+            def pnl_for_solver(s):
+                return pnl_total_at_S(s, float(k_ul), float(k_shorts), float(k_ll),
+                                     float(k_call), tau, r2, float(iv_c_long), net_debit)
+
+            # Buscar raíz entre valle y k_call
+            # Primero verificar que hay cambio de signo
+            pnl_at_valle = pnl_for_solver(VALLE_strike)
+            pnl_at_kcall = pnl_for_solver(float(k_call))
+
+            if pnl_at_valle * pnl_at_kcall < 0:  # Cambio de signo
+                BreakEvenCCAL1_strike = brentq(pnl_for_solver, VALLE_strike, float(k_call))
+        except:
+            pass  # Si falla, dejar como None
+
+    # --- 8. PICOCCAL - Máximo del Call Calendar ---
+    # Buscar máximo de PnL_Total(S) en región [BreakEvenCCAL1, k_call*1.1]
+    PICOCCAL_strike = None
+    PICOCCAL_PnL_pts = None
+    PICOCCAL_PnL_USD = None
+
+    if tau > 0 and iv_c_long is not None and not math.isnan(iv_c_long):
+        # Rango de búsqueda: [k_call*0.95, k_call*1.15]
+        search_start = float(k_call) * 0.95
+        search_end = float(k_call) * 1.15
+        search_range_ccal = np.linspace(search_start, search_end, 100)
+        pnl_values_ccal = [pnl_total_at_S(s, float(k_ul), float(k_shorts), float(k_ll),
+                                          float(k_call), tau, r2, float(iv_c_long), net_debit)
+                          for s in search_range_ccal]
+        max_idx = np.argmax(pnl_values_ccal)
+        PICOCCAL_strike = search_range_ccal[max_idx]
+        PICOCCAL_PnL_pts = pnl_values_ccal[max_idx]
+        PICOCCAL_PnL_USD = PICOCCAL_PnL_pts * 100.0
+
+    # --- 9. BreakEvenCCAL2 - Segundo breakeven del Call Calendar ---
+    # Buscar raíz de PnL_Total(S) = 0 en región [k_call, k_call*1.5]
+    BreakEvenCCAL2_strike = None
+
+    if PICOCCAL_strike is not None and tau > 0 and iv_c_long is not None and not math.isnan(iv_c_long):
+        from scipy.optimize import brentq
+        try:
+            def pnl_for_solver(s):
+                return pnl_total_at_S(s, float(k_ul), float(k_shorts), float(k_ll),
+                                     float(k_call), tau, r2, float(iv_c_long), net_debit)
+
+            # Buscar raíz entre PICOCCAL y k_call*1.5
+            search_end = float(k_call) * 1.5
+            pnl_at_pico = pnl_for_solver(PICOCCAL_strike)
+            pnl_at_end = pnl_for_solver(search_end)
+
+            if pnl_at_pico * pnl_at_end < 0:  # Cambio de signo
+                BreakEvenCCAL2_strike = brentq(pnl_for_solver, PICOCCAL_strike, search_end)
+        except:
+            pass
+
+    # --- 10. UEL (Upper Expiration Line) - Asíntota superior ---
+    # Cuando S -> ∞: PnL = -net_debit + 2·k_call·(1 - e^(-r2·τ))
+    UEL_pts = None
+    UEL_USD = None
+    if tau > 0:
+        UEL_pts = -net_debit + 2*float(k_call)*(1 - math.exp(-r2*tau))
+        UEL_USD = UEL_pts * 100.0
+
     # Construir output
     out = {
         "delta_total": round(delta_total, 6),
@@ -2568,6 +2736,41 @@ def compute_allantis_metrics(spot, r_base, exp1, dte1, k_ul, k_shorts, k_ll, k_c
         "price_ask_c_long": None if math.isnan(ask_c_long) else round(ask_c_long, 4),
         "price_last_c_long": None if math.isnan(last_c_long) else round(last_c_long, 4),
         "price_mid_c_long": None if math.isnan(p_c_long) else round(p_c_long, 4),
+
+        # ========== PUNTOS GEOMÉTRICOS @ VENCIMIENTO DTE1 ==========
+        # Asíntotas
+        "LEL_pts": round(LEL_pts, 2) if LEL_pts is not None else None,
+        "LEL_USD": round(LEL_USD, 2) if LEL_USD is not None else None,
+        "UEL_pts": round(UEL_pts, 2) if UEL_pts is not None else None,
+        "UEL_USD": round(UEL_USD, 2) if UEL_USD is not None else None,
+
+        # Punto de inflexión LEL
+        "PuntoLEL_strike": round(PuntoLEL_strike, 2) if PuntoLEL_strike is not None else None,
+        "PuntoLEL_PnL_pts": round(PuntoLEL_PnL_pts, 2) if PuntoLEL_PnL_pts is not None else None,
+        "PuntoLEL_PnL_USD": round(PuntoLEL_PnL_USD, 2) if PuntoLEL_PnL_USD is not None else None,
+
+        # Breakevens BWB
+        "BreakEvenBWB1_strike": round(BreakEvenBWB1_strike, 2) if BreakEvenBWB1_strike is not None else None,
+        "BreakEvenBWB2_strike": round(BreakEvenBWB2_strike, 2) if BreakEvenBWB2_strike is not None else None,
+
+        # Pico BWB
+        "PICOBWB_strike": round(PICOBWB_strike, 2) if PICOBWB_strike is not None else None,
+        "PICOBWB_PnL_pts": round(PICOBWB_PnL_pts, 2) if PICOBWB_PnL_pts is not None else None,
+        "PICOBWB_PnL_USD": round(PICOBWB_PnL_USD, 2) if PICOBWB_PnL_USD is not None else None,
+
+        # Valle (Death Valley de Allantis)
+        "VALLE_strike": round(VALLE_strike, 2) if VALLE_strike is not None else None,
+        "VALLE_PnL_pts": round(VALLE_PnL_pts, 2) if VALLE_PnL_pts is not None else None,
+        "VALLE_PnL_USD": round(VALLE_PnL_USD, 2) if VALLE_PnL_USD is not None else None,
+
+        # Breakevens Call Calendar
+        "BreakEvenCCAL1_strike": round(BreakEvenCCAL1_strike, 2) if BreakEvenCCAL1_strike is not None else None,
+        "BreakEvenCCAL2_strike": round(BreakEvenCCAL2_strike, 2) if BreakEvenCCAL2_strike is not None else None,
+
+        # Pico Call Calendar
+        "PICOCCAL_strike": round(PICOCCAL_strike, 2) if PICOCCAL_strike is not None else None,
+        "PICOCCAL_PnL_pts": round(PICOCCAL_PnL_pts, 2) if PICOCCAL_PnL_pts is not None else None,
+        "PICOCCAL_PnL_USD": round(PICOCCAL_PnL_USD, 2) if PICOCCAL_PnL_USD is not None else None,
     }
 
     return out
