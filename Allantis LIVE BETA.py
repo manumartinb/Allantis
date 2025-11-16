@@ -238,13 +238,13 @@ MIN_VOL_BACK  = 1              # Volumen mínimo para opciones BACK (k2)
 
 # === DTE (Days To Expiration) - Rangos para expiraciones ===
 # Se procesan TODAS las expiraciones dentro de cada rango (sin límites de cantidad)
-RANGE_A = (150, 170)       # ! Rango DTE para DTE1 (aprox 160 DTE)
+RANGE_A = (120, 180)       # ! Rango DTE para DTE1 (aprox 160 DTE)
                            # Usado para: BWB puts completo (+4P:-8P:+4P) + short calls (-2C)
                            # Ejemplos alternativos:
                            # (140, 180): Ventana más amplia alrededor de 160 DTE
                            # (155, 165): Ventana muy estrecha para mayor precisión
 
-RANGE_B = (210, 230)       # ! Rango DTE para DTE2 (aprox 220 DTE)
+RANGE_B = (180, 260)       # ! Rango DTE para DTE2 (aprox 220 DTE)
                            # Usado para: long calls del calendario (+2C)
                            # IMPORTANTE: RANGE_B debe ser > RANGE_A para estructura Allantis válida
                            # Ejemplos alternativos:
@@ -5436,7 +5436,7 @@ def main():
     print(f"{'='*70}")
 
     # Buscar directorios temp_batman_* en el escritorio
-    orphan_dirs = sorted(DESKTOP.glob("temp_batman_*"), key=lambda p: p.name, reverse=True)
+    orphan_dirs = sorted(DESKTOP.glob("xxxx_*"), key=lambda p: p.name, reverse=True)
 
     if orphan_dirs:
         print(f"\n[!] DETECTADOS {len(orphan_dirs)} DIRECTORIO(S) HUÉRFANO(S):")
