@@ -205,6 +205,10 @@ FILTER_FF_BAT_THRESHOLD = 0.1         # Umbral para gráficos de FF_BAT (Forward
 NUM_RANDOM_FILES = 1     # ! Número de archivos CSV a procesar aleatoriamente del directorio DATA_DIR
                              # Útil para backtests rápidos sin procesar todo el histórico
                              # Ejemplo: 2 procesa 2 días aleatorios, 0 o None procesa TODOS los archivos
+PARALLEL_BATCH_SIZE = 50     # ! Tamaño de lote para procesamiento paralelo (evita MemoryError)
+                             # Divide las tareas en chunks más pequeños para reducir presión de memoria
+                             # Ejemplo: 50 procesa 50 tareas a la vez, luego el siguiente lote
+                             # Valores recomendados: 30-100 dependiendo de RAM disponible
 THETA_TO_DAILY = 100.0       # Multiplicador SPX para convertir puntos a USD
                              # Los theta_BS del snapshot ya vienen en formato diario (por día)
                              # Ejemplo: theta_BS = -2.847 puntos/día → -2.847 × 100 = -284.7 USD/día
@@ -5689,20 +5693,41 @@ def main():
                             )
                             tasks.append(task)
 
-                # Ejecutar en paralelo si hay tareas - STREAMING LAZY (sin list())
+                # Ejecutar en paralelo si hay tareas - PROCESAMIENTO POR LOTES (evita MemoryError)
                 if tasks:
                     import os as os_module
                     num_workers = os_module.cpu_count() or 1
                     total_tasks = len(tasks)
                     print(f"     [PARALLEL] Procesando {total_tasks} tareas Allantis con {num_workers} workers...")
 
-                    with ProcessPoolExecutor(max_workers=num_workers) as executor:
-                        # Iteración lazy sobre resultados (no list())
-                        for task_idx, result in enumerate(executor.map(_process_allantis_candidate, tasks), start=1):
-                            rows.extend(result)
-                            if task_idx % max(1, total_tasks // 10) == 0 or task_idx == total_tasks:
-                                progress_pct = 100 * task_idx / total_tasks
-                                print(f"     [PARALLEL] Progreso candidatos: {task_idx}/{total_tasks} ({progress_pct:.1f}%)")
+                    # Dividir tareas en lotes (chunks) para reducir presión de memoria
+                    batch_size = PARALLEL_BATCH_SIZE
+                    num_batches = (total_tasks + batch_size - 1) // batch_size  # Redondeo hacia arriba
+                    print(f"     [PARALLEL] Dividiendo en {num_batches} lotes de ~{batch_size} tareas cada uno...")
+
+                    tasks_completed = 0
+                    for batch_num in range(num_batches):
+                        # Extraer el lote actual
+                        start_idx = batch_num * batch_size
+                        end_idx = min(start_idx + batch_size, total_tasks)
+                        batch_tasks = tasks[start_idx:end_idx]
+                        batch_len = len(batch_tasks)
+
+                        print(f"     [PARALLEL] Procesando lote {batch_num + 1}/{num_batches} ({batch_len} tareas)...")
+
+                        # Procesar lote con ProcessPoolExecutor
+                        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+                            # Iteración lazy sobre resultados del lote actual
+                            for task_idx, result in enumerate(executor.map(_process_allantis_candidate, batch_tasks), start=1):
+                                rows.extend(result)
+                                tasks_completed += 1
+
+                                # Mostrar progreso global
+                                if tasks_completed % max(1, total_tasks // 10) == 0 or tasks_completed == total_tasks:
+                                    progress_pct = 100 * tasks_completed / total_tasks
+                                    print(f"     [PARALLEL] Progreso candidatos: {tasks_completed}/{total_tasks} ({progress_pct:.1f}%)")
+
+                        print(f"     [PARALLEL] Lote {batch_num + 1}/{num_batches} completado. Total acumulado: {len(rows)} candidatos.")
 
                     print(f"     [PARALLEL] Completado. {len(rows)} candidatos Allantis generados.")
 
