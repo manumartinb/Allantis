@@ -351,6 +351,22 @@ AQI_MIN = 0.5                         # AQI mínimo aceptable (valores típicos:
 AQI_MAX = 100000                      # Sin límite superior
 CALCULATE_AQI = True                  # Control para cálculo de AQI
 
+# === FILTRO LEL (Lower Expected Loss - Asíntota inferior) ===
+# LEL representa la pérdida máxima en el extremo inferior (bajada extrema de precio)
+# Valores en puntos SPX (multiplicar por 100 para USD)
+FILTER_LEL_ENABLED = True             # True: aplica filtro por LEL | False: no filtra
+LEL_MIN = -10000                      # LEL mínimo aceptable en puntos (ej: -100 pts = -$10,000)
+LEL_MAX = 100000                      # LEL máximo (sin límite superior efectivo)
+                                       # EJEMPLO: LEL_MIN = 150 → solo estructuras con LEL >= 150 pts
+
+# === FILTRO UEL (Upper Expected Loss - Asíntota superior) ===
+# UEL representa la pérdida máxima en el extremo superior (subida extrema de precio)
+# Valores en puntos SPX (multiplicar por 100 para USD)
+FILTER_UEL_ENABLED = True             # True: aplica filtro por UEL | False: no filtra
+UEL_MIN = -10000                      # UEL mínimo aceptable en puntos (ej: -100 pts = -$10,000)
+UEL_MAX = 100000                      # UEL máximo (sin límite superior efectivo)
+                                       # EJEMPLO: UEL_MIN = 200 → solo estructuras con UEL >= 200 pts
+
 # === FILTRO NET_CREDIT_DIFF (solo aplica en CSV Copia con mediana T+0) ===
 # Filtra estructuras comparando net_credit vs net_credit_mediana (% diferencia)
 FILTER_NET_CREDIT_DIFF_ENABLED = False  # True: aplica filtro | False: no filtra
@@ -5808,6 +5824,14 @@ def main():
             if FILTER_AQI_ENABLED and "AQI" in df_chunk.columns:
                 mask_advanced &= df_chunk["AQI"].notna() & (df_chunk["AQI"] >= AQI_MIN) & (df_chunk["AQI"] <= AQI_MAX)
 
+            # Filtro LEL (Lower Expected Loss - Asíntota inferior)
+            if FILTER_LEL_ENABLED and "LEL_pts" in df_chunk.columns:
+                mask_advanced &= df_chunk["LEL_pts"].notna() & (df_chunk["LEL_pts"] >= LEL_MIN) & (df_chunk["LEL_pts"] <= LEL_MAX)
+
+            # Filtro UEL (Upper Expected Loss - Asíntota superior)
+            if FILTER_UEL_ENABLED and "UEL_pts" in df_chunk.columns:
+                mask_advanced &= df_chunk["UEL_pts"].notna() & (df_chunk["UEL_pts"] >= UEL_MIN) & (df_chunk["UEL_pts"] <= UEL_MAX)
+
             # Aplicar filtros avanzados
             df_chunk = df_chunk[mask_advanced]
             del mask_advanced
@@ -6219,12 +6243,13 @@ def main():
     if df.empty:
         print("\nNo hay filas tras filtros; no se aplica orden. CSV vacío.")
     else:
-        choice = "theta"  # Por defecto para Allantis: ["theta", "delta", "ff_atm", "ratio_bwb", "net_credit"]
+        # Usar RANKING_MODE para determinar el criterio de ordenamiento
+        choice = RANKING_MODE.lower() if RANKING_MODE else "theta"  # Usar RANKING_MODE configurado
 
         print(f"\n{'─'*70}")
         print(f"ORDENAMIENTO DE CANDIDATOS ALLANTIS")
         print(f"{'─'*70}")
-        print(f"[INFO] Criterio seleccionado: {choice}")
+        print(f"[INFO] Criterio seleccionado: {choice} (RANKING_MODE)")
         print(f"[INFO] Estrategia: {sort_strategy}")
 
         try:
