@@ -5446,7 +5446,7 @@ def main():
     print("SISTEMA DE RECUPERACIÓN AUTOMÁTICA")
     print(f"{'='*70}")
 
-    # Buscar directorios tis_* en el escritorio
+    # Buscar directorios temp_allantis_* en el escritorio
     orphan_dirs = sorted(DESKTOP.glob("xxxx_*"), key=lambda p: p.name, reverse=True)
 
     if orphan_dirs:
@@ -7454,30 +7454,21 @@ def main():
             # ============================================================
             # REORDENAMIENTO DE COLUMNAS según especificación
             # ============================================================
-            # Definir orden deseado (adaptado para Allantis - MISMO ORDEN QUE DF PRINCIPAL)
+            # Definir orden deseado (adaptado para Allantis)
             columnas_ordenadas = [
-                # Columnas principales en orden específico (primeras 7 según requerimiento)
-                "url",
-                "delta_total",
-                "theta_total",
-                "DTE1/DTE2",
-                "LEL_pts",
-                "MASTER_DISTANCE",
-                "AQI",
-                # Resto de columnas principales
+                # Columnas principales en orden específico
                 "dia",
+                "url",
                 "net_credit",
+                "DTE1/DTE2",
                 "k_ul",                   # Strikes de Allantis (5 patas)
                 "k_shorts",
                 "k_ll",
                 "k_call",
-                # IVs de las 5 patas
-                "iv_ul",
-                "iv_shorts",
-                "iv_ll",
-                "iv_c_short",
-                "iv_c_long",
-                # Métricas Batman eliminadas (no aplican a BWB)
+                "delta_total",
+                "theta_total",
+                # Métricas de Batman/BQI eliminadas - no aplican a Allantis
+                # "Death valley", "PnLDV", "EarL", "EarR", "UEL_inf_USD" eliminados
             ]
 
             # Agregar columnas que existen pero no están en la lista (el resto...)
