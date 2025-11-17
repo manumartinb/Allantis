@@ -21,6 +21,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import List, Optional, Tuple
 import time
+import gc
 
 import math
 import warnings
@@ -141,6 +142,7 @@ def paged_get_csv(cli: httpx.Client, url: str, params: dict) -> pd.DataFrame:
     frames: List[pd.DataFrame] = []
     cur_url, p = url, params
     attempts = 0
+    total_memory_mb = 0
     while cur_url:
         try:
             r = cli.get(cur_url, params=p, timeout=TIMEOUT_S)
@@ -163,7 +165,23 @@ def paged_get_csv(cli: httpx.Client, url: str, params: dict) -> pd.DataFrame:
         r.raise_for_status()
         txt = r.text
         if txt.strip():
-            frames.append(pd.read_csv(StringIO(txt)))
+            df_chunk = pd.read_csv(StringIO(txt))
+            # Optimizar tipos de datos inmediatamente para reducir memoria
+            df_chunk = optimize_dtypes(df_chunk)
+
+            chunk_mem_mb = df_chunk.memory_usage(deep=True).sum() / (1024**2)
+            total_memory_mb += chunk_mem_mb
+
+            frames.append(df_chunk)
+
+            # Si acumulamos demasiado (>1GB), consolidar parcialmente
+            if total_memory_mb > 1024:
+                print(f"[{timestamp_now()}] [info] Consolidando {len(frames)} chunks parciales ({total_memory_mb:.1f} MB)...")
+                df_partial = pd.concat(frames, ignore_index=True)
+                df_partial = optimize_dtypes_aggressive(df_partial, verbose=False)
+                frames = [df_partial]
+                total_memory_mb = df_partial.memory_usage(deep=True).sum() / (1024**2)
+
         nxt = r.headers.get("Next-Page") or r.headers.get("next-page")
         cur_url, p = (nxt, None) if nxt and nxt != "null" else (None, None)
 
@@ -221,6 +239,135 @@ def get_realtime_r_continuous() -> float:
         return float(r) if math.isfinite(r) else 0.0
     except Exception:
         return 0.0
+
+# ================== OPTIMIZACIÓN DE MEMORIA ==================
+def optimize_dtypes(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Castea columnas numéricas a tipos más eficientes (float32, int32) para reducir memoria.
+    """
+    if df.empty:
+        return df
+
+    df_opt = df.copy()
+
+    # Float64 → Float32
+    float_cols = df_opt.select_dtypes(include=['float64']).columns
+    for col in float_cols:
+        df_opt[col] = df_opt[col].astype('float32')
+
+    # Int64 → Int32 (si cabe en rango)
+    int_cols = df_opt.select_dtypes(include=['int64']).columns
+    for col in int_cols:
+        col_min = df_opt[col].min() if not df_opt[col].isna().all() else 0
+        col_max = df_opt[col].max() if not df_opt[col].isna().all() else 0
+        # Rango int32: -2,147,483,648 a 2,147,483,647
+        if col_min >= -2147483648 and col_max <= 2147483647:
+            df_opt[col] = df_opt[col].astype('Int32')
+
+    return df_opt
+
+
+def optimize_dtypes_aggressive(df: pd.DataFrame, verbose: bool = False) -> pd.DataFrame:
+    """
+    Optimización AGRESIVA de tipos de datos para minimizar uso de memoria.
+
+    Aplica:
+    - float64 → float32 (reduce 50% memoria)
+    - int64 → int32/int16/int8 (según rango)
+    - object → category (para strings repetitivos, reduce 80-95% memoria)
+    - Identifica y optimiza fechas/timestamps
+
+    Esta función puede reducir el uso de memoria en 60-80% para DataFrames típicos.
+    """
+    if df.empty:
+        return df
+
+    if verbose:
+        mem_before = df.memory_usage(deep=True).sum() / (1024**2)
+        print(f"[{timestamp_now()}]   [OPTIMIZACIÓN] Iniciando optimización de {len(df):,} filas, {len(df.columns)} columnas...")
+        print(f"[{timestamp_now()}]   [OPTIMIZACIÓN] Memoria antes: {mem_before:.1f} MB")
+
+    # Evitar modificar el original
+    df = df.copy()
+
+    # 1. Float64 → Float32
+    float_cols = df.select_dtypes(include=['float64']).columns
+    if verbose and len(float_cols) > 0:
+        print(f"[{timestamp_now()}]   [PASO 1/3] Convirtiendo {len(float_cols)} columnas float64 → float32...", end='', flush=True)
+
+    for col in float_cols:
+        df[col] = df[col].astype('float32')
+
+    if verbose and len(float_cols) > 0:
+        print(" ✓")
+
+    # 2. Int64 → Int32/Int16/Int8 (según rango)
+    int_cols = df.select_dtypes(include=['int64']).columns
+    if verbose and len(int_cols) > 0:
+        print(f"[{timestamp_now()}]   [PASO 2/3] Optimizando {len(int_cols)} columnas int64 → int32/int16/int8...", end='', flush=True)
+
+    int8_count = 0
+    int16_count = 0
+    int32_count = 0
+
+    for col in int_cols:
+        if df[col].isna().all():
+            continue
+
+        col_min = df[col].min()
+        col_max = df[col].max()
+
+        # Intentar int8 (-128 a 127)
+        if col_min >= -128 and col_max <= 127:
+            df[col] = df[col].astype('int8')
+            int8_count += 1
+        # Intentar int16 (-32,768 a 32,767)
+        elif col_min >= -32768 and col_max <= 32767:
+            df[col] = df[col].astype('int16')
+            int16_count += 1
+        # Intentar int32
+        elif col_min >= -2147483648 and col_max <= 2147483647:
+            df[col] = df[col].astype('int32')
+            int32_count += 1
+        # Quedarse en int64
+
+    if verbose and len(int_cols) > 0:
+        print(f" ✓ (int8: {int8_count}, int16: {int16_count}, int32: {int32_count})")
+
+    # 3. Object → Category (CRÍTICO para reducir memoria)
+    # Esto es especialmente efectivo para columnas con valores repetidos
+    obj_cols = df.select_dtypes(include=['object']).columns
+
+    if verbose and len(obj_cols) > 0:
+        print(f"[{timestamp_now()}]   [PASO 3/3] Analizando {len(obj_cols)} columnas object → category...", end='', flush=True)
+
+    category_count = 0
+    for col in obj_cols:
+        num_unique = df[col].nunique()
+        num_total = len(df[col])
+
+        # Si hay menos del 50% de valores únicos, convertir a category
+        # Category es muy eficiente cuando hay repetición
+        if num_unique < num_total * 0.5:
+            df[col] = df[col].astype('category')
+            category_count += 1
+
+    if verbose and len(obj_cols) > 0:
+        print(f" ✓ ({category_count}/{len(obj_cols)} convertidas a category)")
+
+    # 4. Datetime optimization (si hay columnas de fecha)
+    # Pandas datetime64[ns] usa 8 bytes, podemos reducir a datetime64[ms] (4 bytes) si no necesitamos nanosegundos
+    datetime_cols = df.select_dtypes(include=['datetime64']).columns
+    for col in datetime_cols:
+        # Mantener como datetime64[ns] pero asegurarnos que no haya NaT innecesarios
+        pass  # Por ahora no optimizar datetime, es complejo y puede romper lógica
+
+    if verbose:
+        mem_after = df.memory_usage(deep=True).sum() / (1024**2)
+        reduction_pct = 100 * (1 - mem_after / mem_before)
+        print(f"[{timestamp_now()}]   [OPTIMIZACIÓN] Memoria después: {mem_after:.1f} MB ({reduction_pct:.1f}% reducción)")
+
+    return df
 
 # ================== Helpers numéricos ==================
 SQRT_2PI = math.sqrt(2.0 * math.pi)
@@ -422,6 +569,59 @@ def add_bs_greeks_columns(df: pd.DataFrame, right: np.ndarray, S: np.ndarray, K:
     return (pd.Series(delta), pd.Series(theta_per_day), pd.Series(vega_per_pct))
 
 def postprocess_snapshot_csv(path: Path) -> Optional[Path]:
+    """
+    Post-procesa el snapshot CSV con optimización de memoria.
+    Si el archivo es muy grande (>500MB), usa procesamiento por chunks.
+    """
+    file_size_mb = path.stat().st_size / (1024**2)
+
+    # Si el archivo es >500MB, usar procesamiento por chunks
+    if file_size_mb > 500:
+        print(f"[{timestamp_now()}] [INFO] Archivo grande detectado ({file_size_mb:.1f} MB) - usando procesamiento incremental por chunks")
+        try:
+            df = postprocess_snapshot_csv_chunked(path)
+        except Exception as e:
+            print(f"[{timestamp_now()}] [ERROR] Error en procesamiento por chunks: {e}")
+            print(f"[{timestamp_now()}] [INFO] Intentando procesamiento tradicional...")
+            return postprocess_snapshot_csv_traditional(path)
+    else:
+        # Archivo pequeño, usar método tradicional optimizado
+        return postprocess_snapshot_csv_traditional(path)
+
+    if df is None or df.empty:
+        print(f"[{timestamp_now()}] [INFO] CSV vacío después del post-proceso.")
+        return path
+
+    # Escribir el resultado optimizado
+    try:
+        # Aplicar optimización agresiva antes de escribir
+        print(f"[{timestamp_now()}] [i] Optimizando tipos de datos antes de escribir...")
+        df = optimize_dtypes_aggressive(df, verbose=True)
+
+        # Orden final de columnas
+        for c in FINAL_COLS:
+            if c not in df.columns:
+                df[c] = np.nan
+
+        df_out = df[FINAL_COLS].copy()
+
+        num_cols = ["underlying_price","strike","bid","ask","mid","delta","theta","vega","implied_vol",
+                    "delta_BS","theta_BS","vega_BS","IV_BS","r"]
+        for c in num_cols:
+            df_out[c] = pd.to_numeric(df_out[c], errors="coerce")
+
+        tmp = path.with_suffix(".csv.tmp")
+        df_out.to_csv(tmp, index=False, encoding="utf-8-sig", lineterminator="\n")
+        tmp.replace(path)
+        print(f"[{timestamp_now()}] [OK] Post-proceso aplicado -> {path}")
+        return path
+    except Exception as e:
+        print(f"[{timestamp_now()}] [ERROR] Error al escribir archivo post-procesado: {e}")
+        return None
+
+
+def postprocess_snapshot_csv_traditional(path: Path) -> Optional[Path]:
+    """Procesamiento tradicional para archivos pequeños."""
     try:
         df = pd.read_csv(path, low_memory=False)
     except Exception as e:
@@ -431,6 +631,10 @@ def postprocess_snapshot_csv(path: Path) -> Optional[Path]:
     if df.empty:
         print(f"[{timestamp_now()}] [INFO] CSV vacío; no hay nada que postprocesar.")
         return path
+
+    # Optimizar tipos inmediatamente
+    print(f"[{timestamp_now()}] [i] Optimizando tipos de datos del CSV cargado...")
+    df = optimize_dtypes(df)
 
     # 1) Normalizar strike si procede
     normalize_strike_inplace(df)
@@ -484,6 +688,94 @@ def postprocess_snapshot_csv(path: Path) -> Optional[Path]:
     print(f"[{timestamp_now()}] [OK] Post-proceso aplicado -> {path}")
     return path
 
+
+def postprocess_snapshot_csv_chunked(path: Path, chunksize: int = 50000) -> pd.DataFrame:
+    """
+    Procesa un CSV grande por chunks para evitar colapso de memoria.
+    Retorna el DataFrame procesado completo.
+    """
+    print(f"[{timestamp_now()}] [INFO] Procesando por chunks de {chunksize:,} filas...")
+
+    # Obtener r en continuo una sola vez (es caro)
+    r_val = get_realtime_r_continuous()
+
+    chunks_procesados = []
+    total_memory_mb = 0
+    chunk_num = 0
+
+    try:
+        # Iterar sobre chunks del CSV
+        for chunk in pd.read_csv(path, chunksize=chunksize, low_memory=False):
+            chunk_num += 1
+            print(f"[{timestamp_now()}] [INFO] Procesando chunk {chunk_num} ({len(chunk):,} filas)...")
+
+            # Optimizar tipos inmediatamente
+            chunk = optimize_dtypes(chunk)
+
+            # 1) Normalizar strike si procede
+            normalize_strike_inplace(chunk)
+
+            # 2) Asegurar mid
+            ensure_mid_inplace(chunk)
+
+            # 3) Agregar r
+            chunk["r"] = float(r_val)
+
+            # 4) Inputs para T, IV_BS y griegas
+            T, S, K, r_arr, sigma_snap, right, price = compute_T_and_inputs(chunk, r_val)
+
+            # 5) IV_BS
+            chunk["IV_BS"] = add_ivbs_column(chunk, right, S, K, r_arr, T, price)
+
+            # 6) Griegas BS
+            sigma_bs = np.where(np.isfinite(chunk["IV_BS"].to_numpy(dtype=float)),
+                                chunk["IV_BS"].to_numpy(dtype=float),
+                                sigma_snap)
+
+            d_bs, th_bs, vg_bs = add_bs_greeks_columns(chunk, right, S, K, r_arr, T, sigma_bs)
+            chunk["delta_BS"] = d_bs
+            chunk["theta_BS"] = th_bs
+            chunk["vega_BS"]  = vg_bs
+
+            # 7) Eliminar columnas temporales
+            for col in ("snapshot_date_et", "snapshot_time_et"):
+                if col in chunk.columns:
+                    chunk.drop(columns=[col], inplace=True)
+
+            # Optimizar agresivamente antes de acumular
+            chunk = optimize_dtypes_aggressive(chunk, verbose=False)
+
+            chunk_mem_mb = chunk.memory_usage(deep=True).sum() / (1024**2)
+            total_memory_mb += chunk_mem_mb
+
+            chunks_procesados.append(chunk)
+            print(f"[{timestamp_now()}] [INFO] Chunk {chunk_num} procesado: {chunk_mem_mb:.1f} MB (acumulado: {total_memory_mb:.1f} MB)")
+
+            # Si acumulamos demasiado (>2GB), consolidar parcialmente
+            if total_memory_mb > 2048:
+                print(f"[{timestamp_now()}] [INFO] Límite de memoria alcanzado - consolidando {len(chunks_procesados)} chunks...")
+                df_partial = pd.concat(chunks_procesados, ignore_index=True)
+                df_partial = optimize_dtypes_aggressive(df_partial, verbose=True)
+                chunks_procesados = [df_partial]
+                gc.collect()
+                total_memory_mb = df_partial.memory_usage(deep=True).sum() / (1024**2)
+                print(f"[{timestamp_now()}] [INFO] Consolidación completada: {total_memory_mb:.1f} MB")
+
+        # Consolidar todos los chunks
+        print(f"[{timestamp_now()}] [INFO] Consolidación final de {len(chunks_procesados)} chunks...")
+        df_final = pd.concat(chunks_procesados, ignore_index=True)
+
+        # Optimizar el resultado final
+        print(f"[{timestamp_now()}] [INFO] Optimizando DataFrame final...")
+        df_final = optimize_dtypes_aggressive(df_final, verbose=True)
+
+        print(f"[{timestamp_now()}] [OK] Procesamiento por chunks completado: {len(df_final):,} filas totales")
+        return df_final
+
+    except Exception as e:
+        print(f"[{timestamp_now()}] [ERROR] Error durante procesamiento por chunks: {e}")
+        raise
+
 # ================== Flujo principal: foto + post (SHOT NOW original) ==================
 def take_snapshot_once() -> Optional[Path]:
     now = et_now()
@@ -505,6 +797,10 @@ def take_snapshot_once() -> Optional[Path]:
         return None
 
     df = pd.concat(frames, ignore_index=True)
+
+    # Optimizar tipos de datos inmediatamente después de concatenar
+    print(f"[{timestamp_now()}] [i] Optimizando tipos de datos del snapshot concatenado...")
+    df = optimize_dtypes(df)
 
     # Orden y dedup
     sort_keys = [k for k in ("date", "time", "ms_of_day") if k in df.columns]
