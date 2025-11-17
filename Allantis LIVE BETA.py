@@ -13,8 +13,9 @@ PATAS y VENCIMIENTOS:
   * Lower Line (LL): Long 4P aprox Δ20 (deep OTM, establece rango inferior BWB)
 
 - Calls: Calendar Call superpuesto
-  * Short 2C @ DTE1 (Δ≈30)
-  * Long 2C @ DTE2 (aprox 220 DTE), mismo strike que la short call
+  * Short 2C @ DTE1 (Δ≈30, evaluado en DTE1)
+  * Long 2C @ DTE2 (aprox 220 DTE, Δ≈30 evaluado en DTE2)
+  * IMPORTANTE: Los strikes de las calls son INDEPENDIENTES (pueden ser diferentes)
 
 TOTAL: 5 grupos de patas con 2 expiraciones (DTE1 para puts + short calls, DTE2 para long calls)
 
@@ -22,8 +23,8 @@ GRUPOS DE STRIKES (basados en rangos delta):
 1. UL_DELTA: Upper Line puts (Δ40 puts) - Rango delta para long puts superiores BWB
 2. SHORT_P_DELTA: Short puts centrales (Δ30 puts) - Rango delta para shorts BWB
 3. LL_DELTA: Lower Line puts (Δ20 puts) - Rango delta para long puts deep OTM BWB
-4. SHORT_C_DELTA: Short calls DTE1 (Δ30 calls) - Rango delta para short calls calendario
-5. LONG_C_DELTA: Long calls DTE2 (Δ30 calls) - Rango delta para long calls calendario
+4. SHORT_C_DELTA: Short calls DTE1 (Δ30 calls) - Rango delta evaluado en DTE1
+5. LONG_C_DELTA: Long calls DTE2 (Δ30 calls) - Rango delta evaluado en DTE2 (INDEPENDIENTE)
 
 EXPIRACIONES:
 - RANGE_A: DTE1 (aprox 160 DTE) para BWB puts completo + short calls
@@ -32,8 +33,9 @@ EXPIRACIONES:
 NOVEDADES V1 (base from Batman V23):
 1) **Estructura Allantis 5-leg**:
    - BWB de puts: +4P:-8P:+4P (3 strikes, DTE1)
-   - Calendar call: -2C@DTE1:+2C@DTE2 (mismo strike, 2 expiraciones)
+   - Calendar call: -2C@DTE1:+2C@DTE2 (strikes INDEPENDIENTES, 2 expiraciones)
    - Total: 5 grupos de patas, 20 contratos
+   - MEJORA: Short calls y long calls con rangos delta independientes
    - Función `allantis_value_from_df`: revaloriza estructura completa
    - Cálculo de net_credit forward (5 grupos, 2 expiraciones)
 
@@ -303,19 +305,20 @@ SHORT_CALL_DELTA_MAX = 0.35  # ! Delta máximo para short calls
                              # Rango típico: [0.25, 0.35] para capturar Δ30
 
 # === LONG CALLS (Long 2C @ DTE2) - BASADO EN DELTA ===
-# Long calls del calendario, expira en DTE2, mismo strike que short call
-# NOTA: Este rango se usa para SELECCIONAR el strike, luego se busca el MISMO strike en DTE2
-LONG_CALL_DELTA_MIN = 0.25   # ! Delta mínimo para long calls (Δ30 target en DTE1)
+# Long calls del calendario, expira en DTE2, con rango delta INDEPENDIENTE
+# NOTA: Este rango se evalúa directamente en DTE2 (NO en DTE1 como antes)
+LONG_CALL_DELTA_MIN = 0.25   # ! Delta mínimo para long calls (Δ30 target evaluado en DTE2)
 LONG_CALL_DELTA_MAX = 0.35   # ! Delta máximo para long calls
                              # Rango típico: [0.25, 0.35] para capturar Δ30
-                             # IMPORTANTE: Se selecciona por delta en DTE1, luego se busca mismo K en DTE2
+                             # IMPORTANTE: Se selecciona por delta en DTE2, strikes independientes de short calls
 
 # === Comentarios de referencia ===
-# Estructura Allantis necesita 5 strikes:
+# Estructura Allantis necesita 5 strikes (ahora con calls independientes):
 # - KUL (puts Upper Line, Δ40)
 # - KShorts (puts Short, Δ30)
 # - KLL (puts Lower Line, Δ20)
-# - KCall (calls, Δ30, shared entre short DTE1 y long DTE2)
+# - KCall_Short (call Short@DTE1, Δ30 evaluado en DTE1)
+# - KCall_Long (call Long@DTE2, Δ30 evaluado en DTE2, INDEPENDIENTE)
 # Constraint: KUL > KShorts > KLL (todos puts, strikes decrecientes hacia OTM)
 
 
@@ -420,7 +423,8 @@ PREFERRED_COLUMN_ORDER = [
     "k_ul",                   # Strikes de Allantis (5 patas)
     "k_shorts",
     "k_ll",
-    "k_call",
+    "k_call_short",
+    "k_call_long",
     # IVs de las 5 patas
     "iv_ul",
     "iv_shorts",
@@ -1569,6 +1573,57 @@ def gen_short_call_candidates_by_delta(calls_idx, available_strikes, spot, dte, 
 
     return candidates
 
+def gen_long_call_candidates_by_delta(calls_idx, available_strikes, spot, dte, r,
+                                       delta_min=0.25, delta_max=0.35, q=0.0):
+    """
+    Genera candidatos de Long calls (long 2C @ DTE2) filtrando por rango de delta EN DTE2.
+
+    A diferencia de la versión anterior donde se usaba el mismo strike que las short calls,
+    ahora las long calls tienen su propio rango delta independiente evaluado en DTE2.
+
+    Args:
+        calls_idx: DataFrame indexado por strike con datos de calls en DTE2
+        available_strikes: Lista de strikes disponibles
+        spot: Precio subyacente (SPX)
+        dte: Days to expiration (DTE2, típicamente ~220 DTE)
+        r: Risk-free rate
+        delta_min: Delta mínimo aceptable (ej: 0.25 = 25%)
+        delta_max: Delta máximo aceptable (ej: 0.35 = 35%)
+        q: Dividend yield (default 0.0)
+
+    Returns:
+        Lista de strikes que cumplen con el rango de delta especificado en DTE2
+    """
+    T = max(dte, 1) / 365.0
+    candidates = []
+
+    for K in available_strikes:
+        row = fetch_row(calls_idx, K)
+        if row is None:
+            continue
+
+        bid = float(row.get("bid", np.nan))
+        ask = float(row.get("ask", np.nan))
+        last = float(row.get("lastPrice", np.nan))
+        if math.isnan(last):
+            last = float(row.get("last", np.nan))
+
+        mid = (bid + ask) / 2.0 if (not math.isnan(bid) and not math.isnan(ask) and ask > 0) else last
+
+        if math.isnan(mid) or T <= 0:
+            continue
+
+        iv = implied_vol_call_from_price(spot, K, T, r, q, mid)
+        if iv is None or (isinstance(iv, float) and (math.isnan(iv) or iv <= 0)):
+            continue
+
+        delta = bs_delta_call(spot, K, T, r, iv, q)
+
+        if delta_min <= delta <= delta_max:
+            candidates.append(K)
+
+    return candidates
+
 def fetch_row(idx: pd.DataFrame, K: float):
     """Devuelve la fila de índice 'K' (Series). Si duplicado, toma la primera."""
     try:
@@ -1602,21 +1657,23 @@ def make_url(exp1,k1,exp2,k2,k3):
     legs=[f".{r1}{ymd1}C{int(k1)}x-1", f".{r2}{ymd2}C{int(k2)}x2", f".{r1}{ymd1}C{int(k3)}x-1"]
     return BASE_URL + ",".join(legs)
 
-def make_allantis_url(exp1, k_ul, k_shorts, k_ll, k_call, exp2):
+def make_allantis_url(exp1, k_ul, k_shorts, k_ll, k_call_short, k_call_long, exp2):
     """
     Genera URL de ThetaData para estructura Allantis de 5 patas.
-    Estructura: +4P@k_ul : -8P@k_shorts : +4P@k_ll @ exp1 + -2C@k_call(exp1) : +2C@k_call(exp2)
+    Estructura: +4P@k_ul : -8P@k_shorts : +4P@k_ll @ exp1 + -2C@k_call_short(exp1) : +2C@k_call_long(exp2)
+
+    NOTA: Ahora k_call_short y k_call_long son strikes independientes (pueden ser diferentes).
     """
     ymd1 = yyyymmdd_to_yymmdd(datetime.strptime(exp1, "%Y-%m-%d"))
     ymd2 = yyyymmdd_to_yymmdd(datetime.strptime(exp2, "%Y-%m-%d"))
     r1, r2 = root_for_exp(exp1), root_for_exp(exp2)
 
     legs = [
-        f".{r1}{ymd1}P{int(k_ul)}x4",        # +4P Upper Line
-        f".{r1}{ymd1}P{int(k_shorts)}x-8",   # -8P Shorts
-        f".{r1}{ymd1}P{int(k_ll)}x4",        # +4P Lower Line
-        f".{r1}{ymd1}C{int(k_call)}x-2",     # -2C Short Call @ DTE1
-        f".{r2}{ymd2}C{int(k_call)}x2"       # +2C Long Call @ DTE2
+        f".{r1}{ymd1}P{int(k_ul)}x4",              # +4P Upper Line
+        f".{r1}{ymd1}P{int(k_shorts)}x-8",         # -8P Shorts
+        f".{r1}{ymd1}P{int(k_ll)}x4",              # +4P Lower Line
+        f".{r1}{ymd1}C{int(k_call_short)}x-2",     # -2C Short Call @ DTE1
+        f".{r2}{ymd2}C{int(k_call_long)}x2"        # +2C Long Call @ DTE2
     ]
     return BASE_URL + ",".join(legs)
 
@@ -1766,11 +1823,11 @@ def batman_value_from_df(one_min_df: pd.DataFrame, exp1: str, k1: float, exp2: s
         return None
 
 def allantis_value_from_df(one_min_df: pd.DataFrame, exp1: str, k_ul: float, k_shorts: float,
-                            k_ll: float, k_call: float, exp2: str, root1=None, root2=None):
+                            k_ll: float, k_call_short: float, k_call_long: float, exp2: str, root1=None, root2=None):
     """
     Revaloriza estructura Allantis de 5 patas:
     - BWB Puts @ DTE1: +4P@k_ul : -8P@k_shorts : +4P@k_ll
-    - Call Calendar: -2C@k_call(exp1) : +2C@k_call(exp2)
+    - Call Calendar: -2C@k_call_short(exp1) : +2C@k_call_long(exp2)
 
     Args:
         one_min_df: DataFrame con snapshot del mercado
@@ -1778,7 +1835,8 @@ def allantis_value_from_df(one_min_df: pd.DataFrame, exp1: str, k_ul: float, k_s
         k_ul: Strike Upper Line puts (long 4P)
         k_shorts: Strike Short puts (short 8P)
         k_ll: Strike Lower Line puts (long 4P)
-        k_call: Strike compartido para calls
+        k_call_short: Strike para short call @ DTE1
+        k_call_long: Strike para long call @ DTE2
         exp2: Expiración DTE2 (long calls)
         root1: Root esperado para exp1 (SPX/SPXW)
         root2: Root esperado para exp2 (SPX/SPXW)
@@ -1828,9 +1886,9 @@ def allantis_value_from_df(one_min_df: pd.DataFrame, exp1: str, k_ul: float, k_s
         r_shorts = puts1_filt.loc[np.isclose(puts1_filt["strike"], float(k_shorts), atol=1e-6)]
         r_ll = puts1_filt.loc[np.isclose(puts1_filt["strike"], float(k_ll), atol=1e-6)]
 
-        # Buscar strike de calls
-        r_c_short = calls1_filt.loc[np.isclose(calls1_filt["strike"], float(k_call), atol=1e-6)]
-        r_c_long = calls2_filt.loc[np.isclose(calls2_filt["strike"], float(k_call), atol=1e-6)]
+        # Buscar strikes de calls (ahora independientes)
+        r_c_short = calls1_filt.loc[np.isclose(calls1_filt["strike"], float(k_call_short), atol=1e-6)]
+        r_c_long = calls2_filt.loc[np.isclose(calls2_filt["strike"], float(k_call_long), atol=1e-6)]
 
         # Verificar que todos los strikes existen
         if r_ul.empty or r_shorts.empty or r_ll.empty or r_c_short.empty or r_c_long.empty:
@@ -2257,11 +2315,11 @@ def compute_strategy_metrics(spot,r_base,exp1,dte1,k1,exp2,dte2,k2,k3,precache):
     return out
 
 # ================== MÉTRICAS ALLANTIS (5 LEGS: BWB PUTS + CALL CALENDAR) ==================
-def compute_allantis_metrics(spot, r_base, exp1, dte1, k_ul, k_shorts, k_ll, k_call, exp2, dte2, precache):
+def compute_allantis_metrics(spot, r_base, exp1, dte1, k_ul, k_shorts, k_ll, k_call_short, k_call_long, exp2, dte2, precache):
     """
     Calcula métricas para estructura Allantis de 5 patas:
     - BWB de puts @ DTE1: +4P@UL : -8P@Shorts : +4P@LL
-    - Call Calendar: -2C@DTE1 : +2C@DTE2 (mismo strike k_call)
+    - Call Calendar: -2C@DTE1 : +2C@DTE2 (strikes independientes)
 
     Args:
         spot: precio actual SPX
@@ -2271,13 +2329,17 @@ def compute_allantis_metrics(spot, r_base, exp1, dte1, k_ul, k_shorts, k_ll, k_c
         k_ul: strike Upper Line puts (long 4P)
         k_shorts: strike Short puts (short 8P)
         k_ll: strike Lower Line puts (long 4P)
-        k_call: strike compartido para calls (short 2C @ DTE1, long 2C @ DTE2)
+        k_call_short: strike para short call @ DTE1 (short 2C)
+        k_call_long: strike para long call @ DTE2 (long 2C)
         exp2: expiration DTE2 (RANGE_B, ~220 días)
         dte2: días hasta exp2
         precache: diccionario con datos de opciones por expiration
 
     Returns:
         dict con todas las métricas calculadas
+
+    NOTA: A partir de ahora, k_call_short y k_call_long pueden ser diferentes,
+          ya que tienen rangos delta independientes evaluados en sus respectivas expiraciones.
     """
     # Obtener datos de puts y calls para ambas expiraciones
     _, puts1, _, puts1_idx = precache[exp1]
@@ -2401,9 +2463,9 @@ def compute_allantis_metrics(spot, r_base, exp1, dte1, k_ul, k_shorts, k_ll, k_c
     d_shorts, t_shorts, p_shorts, iv_shorts, bid_shorts, ask_shorts, last_shorts = greeks_price_put(puts1_idx, exp1, k_shorts, T1, r1, q1)  # -8P Shorts
     d_ll, t_ll, p_ll, iv_ll, bid_ll, ask_ll, last_ll = greeks_price_put(puts1_idx, exp1, k_ll, T1, r1, q1)  # +4P LL
 
-    # Calls
-    d_c_short, t_c_short, p_c_short, iv_c_short, bid_c_short, ask_c_short, last_c_short = greeks_price_call(calls1_idx, exp1, k_call, T1, r1, q1)  # -2C @ DTE1
-    d_c_long, t_c_long, p_c_long, iv_c_long, bid_c_long, ask_c_long, last_c_long = greeks_price_call(calls2_idx, exp2, k_call, T2, r2, q2)  # +2C @ DTE2
+    # Calls (ahora con strikes independientes)
+    d_c_short, t_c_short, p_c_short, iv_c_short, bid_c_short, ask_c_short, last_c_short = greeks_price_call(calls1_idx, exp1, k_call_short, T1, r1, q1)  # -2C @ DTE1
+    d_c_long, t_c_long, p_c_long, iv_c_long, bid_c_long, ask_c_long, last_c_long = greeks_price_call(calls2_idx, exp2, k_call_long, T2, r2, q2)  # +2C @ DTE2
 
     # Helper para convertir NaN a 0
     dz = lambda x: 0.0 if (x is None or (isinstance(x, float) and math.isnan(x))) else x
@@ -2523,18 +2585,20 @@ def compute_allantis_metrics(spot, r_base, exp1, dte1, k_ul, k_shorts, k_ll, k_c
 
         return pnl_bwb + pnl_ccal
 
-    # Buscar valle entre k_ul y k_call usando búsqueda numérica
+    # Buscar valle entre k_ul y max(k_call_short, k_call_long) usando búsqueda numérica
     VALLE_strike = None
     VALLE_PnL_pts = None
     VALLE_PnL_USD = None
 
     if tau > 0 and iv_c_long is not None and not math.isnan(iv_c_long) and iv_c_long > 0:
-        # Rango de búsqueda del valle: [k_ul, k_call]
-        if float(k_ul) < float(k_call):
+        # Rango de búsqueda del valle: [k_ul, max(k_call_short, k_call_long)]
+        # El valle puede estar influenciado por ambos strikes de calls
+        max_call_strike = max(float(k_call_short), float(k_call_long))
+        if float(k_ul) < max_call_strike:
             # Muestrear 100 puntos en el rango
-            search_range = np.linspace(float(k_ul), float(k_call), 100)
+            search_range = np.linspace(float(k_ul), max_call_strike, 100)
             pnl_values = [pnl_total_at_S(s, float(k_ul), float(k_shorts), float(k_ll),
-                                         float(k_call), tau, r2, float(iv_c_long), net_debit)
+                                         float(k_call_short), float(k_call_long), tau, r2, float(iv_c_long), net_debit)
                          for s in search_range]
             min_idx = np.argmin(pnl_values)
             VALLE_strike = search_range[min_idx]
@@ -2542,40 +2606,43 @@ def compute_allantis_metrics(spot, r_base, exp1, dte1, k_ul, k_shorts, k_ll, k_c
             VALLE_PnL_USD = VALLE_PnL_pts * 100.0
 
     # --- 7. BreakEvenCCAL1 - Primer breakeven del Call Calendar ---
-    # Buscar raíz de PnL_Total(S) = 0 en región [VALLE, k_call]
+    # Buscar raíz de PnL_Total(S) = 0 en región [VALLE, max_call_strike]
     BreakEvenCCAL1_strike = None
 
     if VALLE_strike is not None and tau > 0 and iv_c_long is not None and not math.isnan(iv_c_long):
         from scipy.optimize import brentq
         try:
+            max_call_strike = max(float(k_call_short), float(k_call_long))
             # Definir función objetivo
             def pnl_for_solver(s):
                 return pnl_total_at_S(s, float(k_ul), float(k_shorts), float(k_ll),
-                                     float(k_call), tau, r2, float(iv_c_long), net_debit)
+                                     float(k_call_short), float(k_call_long), tau, r2, float(iv_c_long), net_debit)
 
-            # Buscar raíz entre valle y k_call
+            # Buscar raíz entre valle y max_call_strike
             # Primero verificar que hay cambio de signo
             pnl_at_valle = pnl_for_solver(VALLE_strike)
-            pnl_at_kcall = pnl_for_solver(float(k_call))
+            pnl_at_kcall = pnl_for_solver(max_call_strike)
 
             if pnl_at_valle * pnl_at_kcall < 0:  # Cambio de signo
-                BreakEvenCCAL1_strike = brentq(pnl_for_solver, VALLE_strike, float(k_call))
+                BreakEvenCCAL1_strike = brentq(pnl_for_solver, VALLE_strike, max_call_strike)
         except:
             pass  # Si falla, dejar como None
 
     # --- 8. PICOCCAL - Máximo del Call Calendar ---
-    # Buscar máximo de PnL_Total(S) en región [BreakEvenCCAL1, k_call*1.1]
+    # Buscar máximo de PnL_Total(S) en región alrededor del promedio de strikes de calls
     PICOCCAL_strike = None
     PICOCCAL_PnL_pts = None
     PICOCCAL_PnL_USD = None
 
     if tau > 0 and iv_c_long is not None and not math.isnan(iv_c_long):
-        # Rango de búsqueda: [k_call*0.95, k_call*1.15]
-        search_start = float(k_call) * 0.95
-        search_end = float(k_call) * 1.15
+        # Usar promedio de strikes de calls como centro de búsqueda
+        avg_call_strike = (float(k_call_short) + float(k_call_long)) / 2.0
+        # Rango de búsqueda: [avg*0.95, avg*1.15]
+        search_start = avg_call_strike * 0.95
+        search_end = avg_call_strike * 1.15
         search_range_ccal = np.linspace(search_start, search_end, 100)
         pnl_values_ccal = [pnl_total_at_S(s, float(k_ul), float(k_shorts), float(k_ll),
-                                          float(k_call), tau, r2, float(iv_c_long), net_debit)
+                                          float(k_call_short), float(k_call_long), tau, r2, float(iv_c_long), net_debit)
                           for s in search_range_ccal]
         max_idx = np.argmax(pnl_values_ccal)
         PICOCCAL_strike = search_range_ccal[max_idx]
@@ -2583,18 +2650,19 @@ def compute_allantis_metrics(spot, r_base, exp1, dte1, k_ul, k_shorts, k_ll, k_c
         PICOCCAL_PnL_USD = PICOCCAL_PnL_pts * 100.0
 
     # --- 9. BreakEvenCCAL2 - Segundo breakeven del Call Calendar ---
-    # Buscar raíz de PnL_Total(S) = 0 en región [k_call, k_call*1.5]
+    # Buscar raíz de PnL_Total(S) = 0 en región [PICOCCAL, avg_call_strike*1.5]
     BreakEvenCCAL2_strike = None
 
     if PICOCCAL_strike is not None and tau > 0 and iv_c_long is not None and not math.isnan(iv_c_long):
         from scipy.optimize import brentq
         try:
+            avg_call_strike = (float(k_call_short) + float(k_call_long)) / 2.0
             def pnl_for_solver(s):
                 return pnl_total_at_S(s, float(k_ul), float(k_shorts), float(k_ll),
-                                     float(k_call), tau, r2, float(iv_c_long), net_debit)
+                                     float(k_call_short), float(k_call_long), tau, r2, float(iv_c_long), net_debit)
 
-            # Buscar raíz entre PICOCCAL y k_call*1.5
-            search_end = float(k_call) * 1.5
+            # Buscar raíz entre PICOCCAL y avg_call_strike*1.5
+            search_end = avg_call_strike * 1.5
             pnl_at_pico = pnl_for_solver(PICOCCAL_strike)
             pnl_at_end = pnl_for_solver(search_end)
 
@@ -2604,11 +2672,12 @@ def compute_allantis_metrics(spot, r_base, exp1, dte1, k_ul, k_shorts, k_ll, k_c
             pass
 
     # --- 10. UEL (Upper Expiration Line) - Asíntota superior ---
-    # Cuando S -> ∞: PnL = -net_debit + 2·k_call·(1 - e^(-r2·τ))
+    # Cuando S -> ∞: PnL = -net_debit + 2·k_call_long·(1 - e^(-r2·τ))
+    # NOTA: Usamos k_call_long porque es la long call que sigue viva en DTE2
     UEL_pts = None
     UEL_USD = None
     if tau > 0:
-        UEL_pts = -net_debit + 2*float(k_call)*(1 - math.exp(-r2*tau))
+        UEL_pts = -net_debit + 2*float(k_call_long)*(1 - math.exp(-r2*tau))
         UEL_USD = UEL_pts * 100.0
 
     # --- 11. MASTER_DISTANCE - Distancia entre breakevens ---
@@ -2706,7 +2775,8 @@ def compute_allantis_metrics(spot, r_base, exp1, dte1, k_ul, k_shorts, k_ll, k_c
         "k_ul": int(k_ul),
         "k_shorts": int(k_shorts),
         "k_ll": int(k_ll),
-        "k_call": int(k_call),
+        "k_call_short": int(k_call_short),  # Strike de short call @ DTE1
+        "k_call_long": int(k_call_long),    # Strike de long call @ DTE2
 
         # IVs
         "iv_ul": iv_ul_fmt,
@@ -3500,9 +3570,10 @@ def _process_allantis_candidate(args):
     """
     Worker para procesar un candidato Allantis en paralelo.
     Estructura: +4P@UL : -8P@Shorts : +4P@LL @ DTE1 + -2C@DTE1 : +2C@DTE2
+    NOTA: Ahora short_call y long_call tienen strikes independientes (rangos delta separados).
     Retorna lista de candidatos Allantis generados.
     """
-    (k_ul, shorts_list, ll_list, call_list, e1, e2, dte_map, spot, r_base, date_es_str, hhmm_es, _hhmm_us,
+    (k_ul, shorts_list, ll_list, short_call_list, long_call_list, e1, e2, dte_map, spot, r_base, date_es_str, hhmm_es, _hhmm_us,
      base_idx, puts1_data, calls1_data, calls2_data, FRAC_SUFFIXES, USE_LIQUIDITY_FILTERS,
      MIN_OI_FRONT, MIN_VOL_FRONT, MIN_OI_BACK, MIN_VOL_BACK,
      PREFILTER_CREDIT_MIN, PREFILTER_CREDIT_MAX) = args
@@ -3542,82 +3613,85 @@ def _process_allantis_candidate(args):
             if not (k_ul > k_shorts > k_ll):
                 continue
 
-            # Loop k_call (compartido entre DTE1 y DTE2)
-            for k_call in call_list:
+            # Loop k_call_short (short calls @ DTE1) y k_call_long (long calls @ DTE2)
+            # NOTA: Ahora son strikes independientes con rangos delta separados
+            for k_call_short in short_call_list:
                 # Validar liquidez de short call @ DTE1
-                if USE_LIQUIDITY_FILTERS and not leg_liquidity_ok_idx(calls1_idx, k_call, MIN_OI_FRONT, MIN_VOL_FRONT):
+                if USE_LIQUIDITY_FILTERS and not leg_liquidity_ok_idx(calls1_idx, k_call_short, MIN_OI_FRONT, MIN_VOL_FRONT):
                     continue
-                mid_c_short = quick_mid_idx(calls1_idx, k_call)
+                mid_c_short = quick_mid_idx(calls1_idx, k_call_short)
                 if math.isnan(mid_c_short):
                     continue
 
-                # Validar liquidez de long call @ DTE2
-                if USE_LIQUIDITY_FILTERS and not leg_liquidity_ok_idx(calls2_idx, k_call, MIN_OI_BACK, MIN_VOL_BACK):
-                    continue
-                mid_c_long = quick_mid_idx(calls2_idx, k_call)
-                if math.isnan(mid_c_long):
-                    continue
+                # Loop sobre long calls @ DTE2 (strikes independientes)
+                for k_call_long in long_call_list:
+                    # Validar liquidez de long call @ DTE2
+                    if USE_LIQUIDITY_FILTERS and not leg_liquidity_ok_idx(calls2_idx, k_call_long, MIN_OI_BACK, MIN_VOL_BACK):
+                        continue
+                    mid_c_long = quick_mid_idx(calls2_idx, k_call_long)
+                    if math.isnan(mid_c_long):
+                        continue
 
-                # Prefiltro de crédito: +4*UL -8*Shorts +4*LL -2*C_short +2*C_long
-                pre_net_credit = (+4*mid_ul) + (-8*mid_shorts) + (+4*mid_ll) + (-2*mid_c_short) + (+2*mid_c_long)
-                if not (PREFILTER_CREDIT_MIN <= pre_net_credit <= PREFILTER_CREDIT_MAX):
-                    continue
+                    # Prefiltro de crédito: +4*UL -8*Shorts +4*LL -2*C_short +2*C_long
+                    pre_net_credit = (+4*mid_ul) + (-8*mid_shorts) + (+4*mid_ll) + (-2*mid_c_short) + (+2*mid_c_long)
+                    if not (PREFILTER_CREDIT_MIN <= pre_net_credit <= PREFILTER_CREDIT_MAX):
+                        continue
 
-                # Generar URL (adaptar make_url para 5 strikes)
-                url = make_allantis_url(e1, k_ul, k_shorts, k_ll, k_call, e2)
+                    # Generar URL (ahora con k_call_short y k_call_long separados)
+                    url = make_allantis_url(e1, k_ul, k_shorts, k_ll, k_call_short, k_call_long, e2)
 
-                # Crear precache local para compute_allantis_metrics
-                precache_local = {
-                    e1: (calls1_data, puts1_data, calls1_idx, puts1_idx),
-                    e2: (calls2_data, None, calls2_idx, None)
-                }
+                    # Crear precache local para compute_allantis_metrics
+                    precache_local = {
+                        e1: (calls1_data, puts1_data, calls1_idx, puts1_idx),
+                        e2: (calls2_data, None, calls2_idx, None)
+                    }
 
-                # Computar métricas
-                met = compute_allantis_metrics(
-                    spot, r_base, e1, dte_map[e1], k_ul, k_shorts, k_ll, k_call, e2, dte_map[e2], precache_local
-                )
+                    # Computar métricas (ahora con k_call_short y k_call_long separados)
+                    met = compute_allantis_metrics(
+                        spot, r_base, e1, dte_map[e1], k_ul, k_shorts, k_ll, k_call_short, k_call_long, e2, dte_map[e2], precache_local
+                    )
 
-                # Metadata
-                root_exp1 = root_for_exp(e1)
-                root_exp2 = root_for_exp(e2)
+                    # Metadata
+                    root_exp1 = root_for_exp(e1)
+                    root_exp2 = root_for_exp(e2)
 
-                # Inicializar columnas FWD vacías (incluye medianas)
-                fwd_cols = {}
-                for suf in FRAC_SUFFIXES:
-                    fwd_cols[f"net_credit_fwd_{suf}"] = None
-                    fwd_cols[f"PnL_fwd_pts_{suf}"] = None
-                    fwd_cols[f"PnL_fwd_pct_{suf}"] = None
-                    fwd_cols[f"PnL_fwd_pts_{suf}_mediana"] = None
-                    fwd_cols[f"PnL_fwd_pct_{suf}_mediana"] = None
-                    fwd_cols[f"SPX_chg_pct_{suf}"] = None
-                    fwd_cols[f"dia_fwd_{suf}"] = None
-                    fwd_cols[f"hora_fwd_{suf}"] = None
-                    # 5 legs para Allantis
-                    for leg in ("ul", "shorts", "ll", "c_short", "c_long"):
-                        fwd_cols[f"fwd_file_{leg}_{suf}"] = None
-                        fwd_cols[f"fwd_row_{leg}_{suf}"] = None
-                        fwd_cols[f"fwd_bid_{leg}_{suf}"] = None
-                        fwd_cols[f"fwd_ask_{leg}_{suf}"] = None
-                        fwd_cols[f"fwd_mid_{leg}_{suf}"] = None
-                        fwd_cols[f"fwd_check_{leg}_{suf}"] = None
-                        fwd_cols[f"fwd_root_{leg}_{suf}"] = None
-                        fwd_cols[f"fwd_root_check_{leg}_{suf}"] = None
+                    # Inicializar columnas FWD vacías (incluye medianas)
+                    fwd_cols = {}
+                    for suf in FRAC_SUFFIXES:
+                        fwd_cols[f"net_credit_fwd_{suf}"] = None
+                        fwd_cols[f"PnL_fwd_pts_{suf}"] = None
+                        fwd_cols[f"PnL_fwd_pct_{suf}"] = None
+                        fwd_cols[f"PnL_fwd_pts_{suf}_mediana"] = None
+                        fwd_cols[f"PnL_fwd_pct_{suf}_mediana"] = None
+                        fwd_cols[f"SPX_chg_pct_{suf}"] = None
+                        fwd_cols[f"dia_fwd_{suf}"] = None
+                        fwd_cols[f"hora_fwd_{suf}"] = None
+                        # 5 legs para Allantis
+                        for leg in ("ul", "shorts", "ll", "c_short", "c_long"):
+                            fwd_cols[f"fwd_file_{leg}_{suf}"] = None
+                            fwd_cols[f"fwd_row_{leg}_{suf}"] = None
+                            fwd_cols[f"fwd_bid_{leg}_{suf}"] = None
+                            fwd_cols[f"fwd_ask_{leg}_{suf}"] = None
+                            fwd_cols[f"fwd_mid_{leg}_{suf}"] = None
+                            fwd_cols[f"fwd_check_{leg}_{suf}"] = None
+                            fwd_cols[f"fwd_root_{leg}_{suf}"] = None
+                            fwd_cols[f"fwd_root_check_{leg}_{suf}"] = None
 
-                rows.append({
-                    "url": url,
-                    "dia": date_es_str,
-                    "hora": hhmm_es,
-                    "SPX": spot,
-                    "r": r_base,
-                    "__base_idx": base_idx,
-                    "exp1": e1,
-                    "exp2": e2,
-                    "hora_us": _hhmm_us,
-                    "root_exp1": root_exp1,
-                    "root_exp2": root_exp2,
-                    **met,
-                    **fwd_cols
-                })
+                    rows.append({
+                        "url": url,
+                        "dia": date_es_str,
+                        "hora": hhmm_es,
+                        "SPX": spot,
+                        "r": r_base,
+                        "__base_idx": base_idx,
+                        "exp1": e1,
+                        "exp2": e2,
+                        "hora_us": _hhmm_us,
+                        "root_exp1": root_exp1,
+                        "root_exp2": root_exp2,
+                        **met,
+                        **fwd_cols
+                    })
 
     return rows
 
@@ -5751,21 +5825,31 @@ def main():
 
                         print(f"     [INCREMENTAL] Exp1 {e1_idx}/{len(exp_A)}: {e1} (DTE={dte_map[e1]})")
 
-                        # Generar candidatos
+                        # Generar candidatos para DTE1 (puts + short calls)
                         ul_list = gen_ul_put_candidates_by_delta(puts1_idx, strikes_puts1, spot, dte_map[e1], r_base, UL_PUT_DELTA_MIN, UL_PUT_DELTA_MAX)
                         shorts_list = gen_short_put_candidates_by_delta(puts1_idx, strikes_puts1, spot, dte_map[e1], r_base, SHORT_PUT_DELTA_MIN, SHORT_PUT_DELTA_MAX)
                         ll_list = gen_ll_put_candidates_by_delta(puts1_idx, strikes_puts1, spot, dte_map[e1], r_base, LL_PUT_DELTA_MIN, LL_PUT_DELTA_MAX)
-                        call_list = gen_short_call_candidates_by_delta(calls1_idx, strikes_calls1, spot, dte_map[e1], r_base, SHORT_CALL_DELTA_MIN, SHORT_CALL_DELTA_MAX)
+                        short_call_list = gen_short_call_candidates_by_delta(calls1_idx, strikes_calls1, spot, dte_map[e1], r_base, SHORT_CALL_DELTA_MIN, SHORT_CALL_DELTA_MAX)
 
-                        if not ul_list or not shorts_list or not ll_list or not call_list:
+                        if not ul_list or not shorts_list or not ll_list or not short_call_list:
                             print(f"       → Sin candidatos válidos para exp1={e1}")
                             continue
 
-                        print(f"       → UL:{len(ul_list)} Shorts:{len(shorts_list)} LL:{len(ll_list)} Calls:{len(call_list)}")
+                        print(f"       → UL:{len(ul_list)} Shorts:{len(shorts_list)} LL:{len(ll_list)} ShortCalls:{len(short_call_list)}")
 
                         for e2_idx, e2 in enumerate(exp_B, start=1):
                             calls2, _, _, _ = precache[e2]
-                            print(f"       [INCREMENTAL] Exp2 {e2_idx}/{len(exp_B)}: {e2} (DTE={dte_map[e2]})")
+                            strikes_calls2 = sorted(set(calls2["strike"].tolist()))
+                            calls2_idx = calls2.set_index("strike")
+
+                            # Generar candidatos para DTE2 (long calls con rango delta independiente)
+                            long_call_list = gen_long_call_candidates_by_delta(calls2_idx, strikes_calls2, spot, dte_map[e2], r_base, LONG_CALL_DELTA_MIN, LONG_CALL_DELTA_MAX)
+
+                            if not long_call_list:
+                                print(f"       [INCREMENTAL] Exp2 {e2_idx}/{len(exp_B)}: {e2} (DTE={dte_map[e2]}) → Sin candidatos long calls válidos")
+                                continue
+
+                            print(f"       [INCREMENTAL] Exp2 {e2_idx}/{len(exp_B)}: {e2} (DTE={dte_map[e2]}) → LongCalls:{len(long_call_list)}")
 
                             # Procesar cada k_ul individualmente
                             for ul_idx, k_ul in enumerate(ul_list, start=1):
@@ -5776,9 +5860,9 @@ def main():
                                     progress_pct = 100 * comb_idx / max(1, total_combinations)
                                     print(f"       [INCR {comb_idx}/{total_combinations} ({progress_pct:.1f}%)] E1={e1} E2={e2} UL={k_ul:.0f} → Procesando...")
 
-                                # Preparar tarea
+                                # Preparar tarea (ahora con short_call_list y long_call_list separados)
                                 task = (
-                                    k_ul, shorts_list, ll_list, call_list, e1, e2, dte_map, spot, r_base,
+                                    k_ul, shorts_list, ll_list, short_call_list, long_call_list, e1, e2, dte_map, spot, r_base,
                                     date_es_str, hhmm_es, _hhmm_us, base_idx,
                                     puts1.reset_index(drop=True),
                                     calls1.reset_index(drop=True),
