@@ -402,9 +402,65 @@ S_PNL = 8000                           # Spot SPX para gráficos de P&L (valor d
 # Caché greeks
 GREEKS_CACHE = {}
 
+# ================== ORDEN DE COLUMNAS PREFERIDO ==================
+# Orden de columnas para CSV output (aplicado tanto en modo incremental como al final)
+# Las primeras 7 columnas son críticas para análisis
+PREFERRED_COLUMN_ORDER = [
+    # Columnas principales en orden específico (primeras 7 según requerimiento)
+    "url",
+    "delta_total",
+    "theta_total",
+    "DTE1/DTE2",
+    "LEL_pts",
+    "MASTER_DISTANCE",
+    "AQI",
+    # Resto de columnas principales
+    "dia",
+    "net_credit",
+    "k_ul",                   # Strikes de Allantis (5 patas)
+    "k_shorts",
+    "k_ll",
+    "k_call",
+    # IVs de las 5 patas
+    "iv_ul",
+    "iv_shorts",
+    "iv_ll",
+    "iv_c_short",
+    "iv_c_long",
+]
+
 # ================== HELPERS ==================
 def safe_filename(text: str) -> str:
     return re.sub(r'[\\/:*?"<>|]+', '-', text)
+
+def get_ordered_fieldnames(all_columns):
+    """
+    Ordena las columnas según PREFERRED_COLUMN_ORDER.
+
+    Args:
+        all_columns: iterable con todas las columnas disponibles
+
+    Returns:
+        Lista de columnas ordenadas: primero las de PREFERRED_COLUMN_ORDER (en orden),
+        luego las columnas restantes que no están en PREFERRED_COLUMN_ORDER,
+        finalmente las columnas que contienen 'fwd', 'root_exp', o 'pnl8000'
+    """
+    all_columns_set = set(all_columns)
+
+    # Columnas prioritarias (en el orden especificado)
+    priority_cols = [c for c in PREFERRED_COLUMN_ORDER if c in all_columns_set]
+
+    # Columnas restantes
+    remaining = [c for c in all_columns if c not in set(PREFERRED_COLUMN_ORDER)]
+
+    # Identificar columnas que deben ir al final (fwd, root_exp, pnl8000)
+    last_cols = [c for c in remaining if any(x in c.lower() for x in ['fwd', 'root_exp', 'pnl8000'])]
+
+    # Resto de columnas van en el medio
+    middle_cols = [c for c in remaining if c not in last_cols]
+
+    # Orden final: prioritarias + medio + últimas
+    return priority_cols + middle_cols + last_cols
 
 def get_filter_stats(df, col_name, filter_min, filter_max):
     """
@@ -5823,9 +5879,10 @@ def main():
                                 # Escribir inmediatamente si hay resultados (ya filtrados)
                                 if result_rows:
                                     if csv_writer is None:
-                                        # Primera escritura: crear header
+                                        # Primera escritura: crear header con orden de columnas preferido
                                         csv_file_handle = open(temp_csv_path, 'w', newline='', encoding='utf-8')
-                                        csv_writer = csv.DictWriter(csv_file_handle, fieldnames=result_rows[0].keys())
+                                        ordered_fieldnames = get_ordered_fieldnames(result_rows[0].keys())
+                                        csv_writer = csv.DictWriter(csv_file_handle, fieldnames=ordered_fieldnames)
                                         csv_writer.writeheader()
 
                                     csv_writer.writerows(result_rows)
@@ -7003,44 +7060,10 @@ def main():
             print(f"{'='*70}\n")
 
     # Reordenación de columnas (adaptado para Allantis)
+    # Usa PREFERRED_COLUMN_ORDER definido globalmente (primeras 7 columnas críticas)
     if not df.empty:
-        preferred_order = [
-            # Columnas principales en orden específico (primeras 7 según requerimiento)
-            "url",
-            "delta_total",
-            "theta_total",
-            "DTE1/DTE2",
-            "LEL_pts",
-            "MASTER_DISTANCE",
-            "AQI",
-            # Resto de columnas principales
-            "dia",
-            "net_credit",
-            "k_ul",                   # Strikes de Allantis (5 patas)
-            "k_shorts",
-            "k_ll",
-            "k_call",
-            # IVs de las 5 patas
-            "iv_ul",
-            "iv_shorts",
-            "iv_ll",
-            "iv_c_short",
-            "iv_c_long",
-            # Métricas Batman eliminadas (no aplican a BWB)
-        ]
-
-        # Separar columnas: prioritarias, fwd/root/pnl8000 (al final), y resto (medio)
-        priority_cols = [c for c in preferred_order if c in df.columns]
-        all_remaining = [c for c in df.columns if c not in set(preferred_order)]
-
-        # Identificar columnas que deben ir al final (fwd, root_exp, pnl8000)
-        last_cols = [c for c in all_remaining if any(x in c.lower() for x in ['fwd', 'root_exp', 'pnl8000'])]
-
-        # Resto de columnas van en el medio
-        middle_cols = [c for c in all_remaining if c not in last_cols]
-
-        # Orden final: prioritarias + medio + últimas
-        df = df[priority_cols + middle_cols + last_cols]
+        ordered_columns = get_ordered_fieldnames(df.columns)
+        df = df[ordered_columns]
 
     print(f"\nTotal enlaces tras filtro: {len(df)}")
     print(df.head(SHOW_MAX).to_string(index=False))
@@ -7454,36 +7477,8 @@ def main():
             # ============================================================
             # REORDENAMIENTO DE COLUMNAS según especificación
             # ============================================================
-            # Definir orden deseado (adaptado para Allantis)
-            columnas_ordenadas = [
-                # Columnas principales en orden específico
-                "dia",
-                "url",
-                "net_credit",
-                "DTE1/DTE2",
-                "k_ul",                   # Strikes de Allantis (5 patas)
-                "k_shorts",
-                "k_ll",
-                "k_call",
-                "delta_total",
-                "theta_total",
-                # Métricas de Batman/BQI eliminadas - no aplican a Allantis
-                # "Death valley", "PnLDV", "EarL", "EarR", "UEL_inf_USD" eliminados
-            ]
-
-            # Agregar columnas que existen pero no están en la lista (el resto...)
-            columnas_existentes = set(df_copy.columns)
-            columnas_ya_ordenadas = set(columnas_ordenadas)
-            columnas_restantes = sorted(columnas_existentes - columnas_ya_ordenadas)
-
-            # Separar columnas restantes: fwd/root/pnl8000 (al final) vs resto (medio)
-            columnas_final = [c for c in columnas_restantes if any(x in c.lower() for x in ['fwd', 'root_exp', 'pnl8000'])]
-            columnas_medio = [c for c in columnas_restantes if c not in columnas_final]
-
-            # Construir lista final: ordenadas + medio + últimas
-            columnas_finales = [c for c in columnas_ordenadas if c in columnas_existentes] + columnas_medio + columnas_final
-
-            # Aplicar reordenamiento
+            # Usa PREFERRED_COLUMN_ORDER definido globalmente (primeras 7 columnas críticas)
+            columnas_finales = get_ordered_fieldnames(df_copy.columns)
             df_copy = df_copy[columnas_finales]
 
             # Generar nombre para CSV copia
