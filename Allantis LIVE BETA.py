@@ -7454,21 +7454,30 @@ def main():
             # ============================================================
             # REORDENAMIENTO DE COLUMNAS según especificación
             # ============================================================
-            # Definir orden deseado (adaptado para Allantis)
+            # Definir orden deseado (adaptado para Allantis - MISMO ORDEN QUE DF PRINCIPAL)
             columnas_ordenadas = [
-                # Columnas principales en orden específico
-                "dia",
+                # Columnas principales en orden específico (primeras 7 según requerimiento)
                 "url",
-                "net_credit",
+                "delta_total",
+                "theta_total",
                 "DTE1/DTE2",
+                "LEL_pts",
+                "MASTER_DISTANCE",
+                "AQI",
+                # Resto de columnas principales
+                "dia",
+                "net_credit",
                 "k_ul",                   # Strikes de Allantis (5 patas)
                 "k_shorts",
                 "k_ll",
                 "k_call",
-                "delta_total",
-                "theta_total",
-                # Métricas de Batman/BQI eliminadas - no aplican a Allantis
-                # "Death valley", "PnLDV", "EarL", "EarR", "UEL_inf_USD" eliminados
+                # IVs de las 5 patas
+                "iv_ul",
+                "iv_shorts",
+                "iv_ll",
+                "iv_c_short",
+                "iv_c_long",
+                # Métricas Batman eliminadas (no aplican a BWB)
             ]
 
             # Agregar columnas que existen pero no están en la lista (el resto...)
