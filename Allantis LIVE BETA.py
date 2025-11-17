@@ -5490,7 +5490,7 @@ def main():
 
                         # Usar este directorio como temp_dir
                         temp_dir = orphan_dir
-                        ts_batch = orphan_dir.name.replace("tis_", "")
+                        ts_batch = orphan_dir.name.replace("temp_allantis_", "")
 
                         # Saltar al procesamiento de carga
                         print(f"[INFO] Saltando generación de candidatos (ya existe archivo consolidado)")
@@ -5568,7 +5568,7 @@ def main():
         batch_out_path = DESKTOP / safe_filename(batch_out_name)
 
         # Directorio temporal para Parquet incrementales
-        temp_dir = DESKTOP / f"tis_{ts_batch}"
+        temp_dir = DESKTOP / f"temp_allantis_{ts_batch}"
         temp_dir.mkdir(exist_ok=True)
         parquet_files = []
 
@@ -8047,4 +8047,3 @@ def main():
 
 if __name__=="__main__":
     main()
-
