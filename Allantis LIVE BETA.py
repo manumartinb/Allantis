@@ -5446,7 +5446,7 @@ def main():
     print("SISTEMA DE RECUPERACIÓN AUTOMÁTICA")
     print(f"{'='*70}")
 
-    # Buscar directorios temp_batman_* en el escritorio
+    # Buscar directorios tis_* en el escritorio
     orphan_dirs = sorted(DESKTOP.glob("xxxx_*"), key=lambda p: p.name, reverse=True)
 
     if orphan_dirs:
@@ -5490,7 +5490,7 @@ def main():
 
                         # Usar este directorio como temp_dir
                         temp_dir = orphan_dir
-                        ts_batch = orphan_dir.name.replace("temp_batman_", "")
+                        ts_batch = orphan_dir.name.replace("tis_", "")
 
                         # Saltar al procesamiento de carga
                         print(f"[INFO] Saltando generación de candidatos (ya existe archivo consolidado)")
@@ -5568,7 +5568,7 @@ def main():
         batch_out_path = DESKTOP / safe_filename(batch_out_name)
 
         # Directorio temporal para Parquet incrementales
-        temp_dir = DESKTOP / f"temp_batman_{ts_batch}"
+        temp_dir = DESKTOP / f"tis_{ts_batch}"
         temp_dir.mkdir(exist_ok=True)
         parquet_files = []
 
@@ -8047,3 +8047,4 @@ def main():
 
 if __name__=="__main__":
     main()
+
