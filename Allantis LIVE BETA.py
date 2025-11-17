@@ -370,7 +370,7 @@ CALCULATE_AQI = True                  # Control para cálculo de AQI
 # LEL representa la pérdida máxima en el extremo inferior (bajada extrema de precio)
 # Valores en puntos SPX (multiplicar por 100 para USD)
 FILTER_LEL_ENABLED = True             # True: aplica filtro por LEL | False: no filtra
-LEL_MIN = -10000                      # LEL mínimo aceptable en puntos (ej: -100 pts = -$10,000)
+LEL_MIN = -300                        # LEL mínimo aceptable en puntos (ej: -100 pts = -$10,000)
 LEL_MAX = 100000                      # LEL máximo (sin límite superior efectivo)
                                        # EJEMPLO: LEL_MIN = 150 → solo estructuras con LEL >= 150 pts
 
