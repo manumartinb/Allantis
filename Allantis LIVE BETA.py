@@ -333,7 +333,7 @@ PREFILTER_CREDIT_MAX = 20000.0      # Crédito máximo: +200 pts = pagar máximo
 # DELTA: Allantis tiene 20 contratos (BWB puts + call calendar)
 # BWB puts: delta negativo (protección bajista), Calls: delta positivo (alcista)
 # Estructura debería ser aproximadamente delta-neutral o ligeramente sesgada
-DELTA_MIN, DELTA_MAX = 0, 0.05    # Rango delta total para 20 contratos
+DELTA_MIN, DELTA_MAX = 0, 0.03    # Rango delta total para 20 contratos
                                        # BWB: ~4*(-0.40) - 8*(-0.30) + 4*(-0.20) = -1.6 + 2.4 - 0.8 = 0
                                        # Calls: -2*(0.30) + 2*(0.30) = 0
                                        # Total esperado: cerca de 0, permitir ±50 para variabilidad
