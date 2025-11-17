@@ -216,7 +216,7 @@ PARALLEL_BATCH_SIZE = 50     # ! [Solo modo batch] Tamaño de lote para procesam
                              # Ejemplo: 50 procesa 50 tareas a la vez, luego el siguiente lote
                              # Valores recomendados: 30-100 dependiendo de RAM disponible
 
-INCREMENTAL_WORKERS = 1      # ! [Solo modo incremental] Número de workers para procesamiento incremental
+INCREMENTAL_WORKERS = 6     # ! [Solo modo incremental] Número de workers para procesamiento incremental
                              # 1 = secuencial (mínima memoria), 2-4 = semi-paralelo (balance)
                              # RECOMENDADO: 1 para evitar MemoryError, 2-4 si tienes RAM suficiente
 
@@ -333,14 +333,14 @@ PREFILTER_CREDIT_MAX = 20000.0      # Crédito máximo: +200 pts = pagar máximo
 # DELTA: Allantis tiene 20 contratos (BWB puts + call calendar)
 # BWB puts: delta negativo (protección bajista), Calls: delta positivo (alcista)
 # Estructura debería ser aproximadamente delta-neutral o ligeramente sesgada
-DELTA_MIN, DELTA_MAX = -0.05, 0.05    # Rango delta total para 20 contratos
+DELTA_MIN, DELTA_MAX = 0, 0.05    # Rango delta total para 20 contratos
                                        # BWB: ~4*(-0.40) - 8*(-0.30) + 4*(-0.20) = -1.6 + 2.4 - 0.8 = 0
                                        # Calls: -2*(0.30) + 2*(0.30) = 0
                                        # Total esperado: cerca de 0, permitir ±50 para variabilidad
 
 # THETA: 20 contratos = theta 5x mayor que Batman
 # Estructura mayormente theta positivo (decay favorable en BWB + calendar)
-THETA_MIN, THETA_MAX = -500.0, 50000.0  # Theta diario en USD
+THETA_MIN, THETA_MAX = 30, 50000.0  # Theta diario en USD
                                          # Allantis típico: 50-200 USD/día positivo
                                          # Permitir negativo por si calendar tiene theta negativo en ciertos casos
 
@@ -362,7 +362,7 @@ PNLDV_MAX =  10000000                 # Rango deshabilitado
 # Métrica de calidad específica para BWB + Calendar
 # Balancea LEL, UEL, picos BWB/CCAL, valle, theta, MASTER_DISTANCE
 FILTER_AQI_ENABLED = True             # True: aplica filtro por AQI | False: no filtra
-AQI_MIN = 0.5                         # AQI mínimo aceptable (valores típicos: 1-5)
+AQI_MIN = 0                         # AQI mínimo aceptable (valores típicos: 1-5)
 AQI_MAX = 100000                      # Sin límite superior
 CALCULATE_AQI = True                  # Control para cálculo de AQI
 
@@ -378,8 +378,8 @@ LEL_MAX = 100000                      # LEL máximo (sin límite superior efecti
 # UEL representa la pérdida máxima en el extremo superior (subida extrema de precio)
 # Valores en puntos SPX (multiplicar por 100 para USD)
 FILTER_UEL_ENABLED = True             # True: aplica filtro por UEL | False: no filtra
-UEL_MIN = -10000                      # UEL mínimo aceptable en puntos (ej: -100 pts = -$10,000)
-UEL_MAX = 100000                      # UEL máximo (sin límite superior efectivo)
+UEL_MIN = -100000                      # UEL mínimo aceptable en puntos (ej: -100 pts = -$10,000)
+UEL_MAX = 0                      # UEL máximo (sin límite superior efectivo)
                                        # EJEMPLO: UEL_MIN = 200 → solo estructuras con UEL >= 200 pts
 
 # === FILTRO NET_CREDIT_DIFF (solo aplica en CSV Copia con mediana T+0) ===
