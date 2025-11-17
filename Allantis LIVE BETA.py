@@ -7004,6 +7004,12 @@ def main():
 
     # Reordenación de columnas (adaptado para Allantis)
     if not df.empty:
+        # DEBUG: Mostrar primeras columnas antes del reordenamiento
+        print(f"\n{'='*70}")
+        print(f"DEBUG: Primeras 15 columnas ANTES del reordenamiento:")
+        print(f"{list(df.columns[:15])}")
+        print(f"{'='*70}\n")
+
         preferred_order = [
             # Columnas principales en orden específico (primeras 7 según requerimiento)
             "url",
@@ -7033,6 +7039,11 @@ def main():
         priority_cols = [c for c in preferred_order if c in df.columns]
         all_remaining = [c for c in df.columns if c not in set(preferred_order)]
 
+        # DEBUG: Mostrar columnas prioritarias encontradas
+        print(f"DEBUG: Columnas prioritarias encontradas ({len(priority_cols)}):")
+        print(f"{priority_cols[:10]}")
+        print(f"")
+
         # Identificar columnas que deben ir al final (fwd, root_exp, pnl8000)
         last_cols = [c for c in all_remaining if any(x in c.lower() for x in ['fwd', 'root_exp', 'pnl8000'])]
 
@@ -7041,6 +7052,11 @@ def main():
 
         # Orden final: prioritarias + medio + últimas
         df = df[priority_cols + middle_cols + last_cols]
+
+        # DEBUG: Mostrar primeras columnas después del reordenamiento
+        print(f"DEBUG: Primeras 15 columnas DESPUÉS del reordenamiento:")
+        print(f"{list(df.columns[:15])}")
+        print(f"{'='*70}\n")
 
     print(f"\nTotal enlaces tras filtro: {len(df)}")
     print(df.head(SHOW_MAX).to_string(index=False))
@@ -7454,6 +7470,12 @@ def main():
             # ============================================================
             # REORDENAMIENTO DE COLUMNAS según especificación
             # ============================================================
+            # DEBUG: Mostrar primeras columnas antes del reordenamiento (CSV COPIA)
+            print(f"\n{'='*70}")
+            print(f"DEBUG CSV COPIA: Primeras 15 columnas ANTES del reordenamiento:")
+            print(f"{list(df_copy.columns[:15])}")
+            print(f"{'='*70}\n")
+
             # Definir orden deseado (adaptado para Allantis - MISMO ORDEN QUE DF PRINCIPAL)
             columnas_ordenadas = [
                 # Columnas principales en orden específico (primeras 7 según requerimiento)
@@ -7485,6 +7507,12 @@ def main():
             columnas_ya_ordenadas = set(columnas_ordenadas)
             columnas_restantes = sorted(columnas_existentes - columnas_ya_ordenadas)
 
+            # DEBUG: Mostrar columnas prioritarias encontradas
+            priority_cols_copy = [c for c in columnas_ordenadas if c in columnas_existentes]
+            print(f"DEBUG CSV COPIA: Columnas prioritarias encontradas ({len(priority_cols_copy)}):")
+            print(f"{priority_cols_copy[:10]}")
+            print(f"")
+
             # Separar columnas restantes: fwd/root/pnl8000 (al final) vs resto (medio)
             columnas_final = [c for c in columnas_restantes if any(x in c.lower() for x in ['fwd', 'root_exp', 'pnl8000'])]
             columnas_medio = [c for c in columnas_restantes if c not in columnas_final]
@@ -7494,6 +7522,11 @@ def main():
 
             # Aplicar reordenamiento
             df_copy = df_copy[columnas_finales]
+
+            # DEBUG: Mostrar primeras columnas después del reordenamiento
+            print(f"DEBUG CSV COPIA: Primeras 15 columnas DESPUÉS del reordenamiento:")
+            print(f"{list(df_copy.columns[:15])}")
+            print(f"{'='*70}\n")
 
             # Generar nombre para CSV copia
             batch_out_name_copy = batch_out_name.replace(".csv", "_T0_mediana.csv")
