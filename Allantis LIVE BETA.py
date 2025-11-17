@@ -7005,17 +7005,21 @@ def main():
     # Reordenación de columnas (adaptado para Allantis)
     if not df.empty:
         preferred_order = [
-            # Columnas principales en orden específico
-            "dia",
+            # Columnas principales en orden específico (primeras 7 según requerimiento)
             "url",
-            "net_credit",
+            "delta_total",
+            "theta_total",
             "DTE1/DTE2",
+            "LEL_pts",
+            "MASTER_DISTANCE",
+            "AQI",
+            # Resto de columnas principales
+            "dia",
+            "net_credit",
             "k_ul",                   # Strikes de Allantis (5 patas)
             "k_shorts",
             "k_ll",
             "k_call",
-            "delta_total",
-            "theta_total",
             # IVs de las 5 patas
             "iv_ul",
             "iv_shorts",
