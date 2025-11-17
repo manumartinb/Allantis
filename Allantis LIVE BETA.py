@@ -205,10 +205,21 @@ FILTER_FF_BAT_THRESHOLD = 0.1         # Umbral para gráficos de FF_BAT (Forward
 NUM_RANDOM_FILES = 1     # ! Número de archivos CSV a procesar aleatoriamente del directorio DATA_DIR
                              # Útil para backtests rápidos sin procesar todo el histórico
                              # Ejemplo: 2 procesa 2 días aleatorios, 0 o None procesa TODOS los archivos
-PARALLEL_BATCH_SIZE = 50     # ! Tamaño de lote para procesamiento paralelo (evita MemoryError)
+
+# ===== MODO DE PROCESAMIENTO =====
+INCREMENTAL_MODE = True      # ! True: Modo incremental (procesa 1 a 1, bajo uso memoria, MUY detallado)
+                             #   False: Modo batch paralelo (más rápido, mayor uso memoria)
+                             # RECOMENDADO: True si tienes problemas de MemoryError
+
+PARALLEL_BATCH_SIZE = 50     # ! [Solo modo batch] Tamaño de lote para procesamiento paralelo
                              # Divide las tareas en chunks más pequeños para reducir presión de memoria
                              # Ejemplo: 50 procesa 50 tareas a la vez, luego el siguiente lote
                              # Valores recomendados: 30-100 dependiendo de RAM disponible
+
+INCREMENTAL_WORKERS = 1      # ! [Solo modo incremental] Número de workers para procesamiento incremental
+                             # 1 = secuencial (mínima memoria), 2-4 = semi-paralelo (balance)
+                             # RECOMENDADO: 1 para evitar MemoryError, 2-4 si tienes RAM suficiente
+
 THETA_TO_DAILY = 100.0       # Multiplicador SPX para convertir puntos a USD
                              # Los theta_BS del snapshot ya vienen en formato diario (por día)
                              # Ejemplo: theta_BS = -2.847 puntos/día → -2.847 × 100 = -284.7 USD/día
@@ -5631,105 +5642,236 @@ def main():
 
                 rows=[]
 
-                # ========== PARALELIZACIÓN DE SELECCIÓN DE CANDIDATOS ALLANTIS ==========
+                # ========== SELECCIÓN DE CANDIDATOS ALLANTIS ==========
                 print(f"     [INFO] Generando combinaciones de estructuras Allantis...")
-                # Allantis: 5 patas (UL, Shorts, LL puts @ DTE1 + Short/Long calls)
-                # Preparar todas las tareas de k_ul para procesamiento paralelo
-                tasks = []
-                for e1 in exp_A:
-                    calls1, puts1, _, _ = precache[e1]
-                    strikes_puts1 = sorted(set(puts1["strike"].tolist()))
-                    strikes_calls1 = sorted(set(calls1["strike"].tolist()))
 
-                    # Indexar por strike para búsqueda rápida
-                    puts1_idx = puts1.set_index("strike")
-                    calls1_idx = calls1.set_index("strike")
+                # MODO INCREMENTAL vs BATCH
+                if INCREMENTAL_MODE:
+                    # ========== MODO INCREMENTAL: Procesa 1 a 1, escribe inmediatamente ==========
+                    print(f"     [INCREMENTAL] Modo incremental activado (workers={INCREMENTAL_WORKERS})")
+                    print(f"     [INCREMENTAL] Procesamiento combinación por combinación con escritura inmediata...")
 
-                    # Generar candidatos UL (Upper Line puts) basados en delta
-                    ul_list = gen_ul_put_candidates_by_delta(
-                        puts1_idx, strikes_puts1, spot, dte_map[e1], r_base,
-                        delta_min=UL_PUT_DELTA_MIN,
-                        delta_max=UL_PUT_DELTA_MAX
-                    )
+                    import csv
+                    import tempfile as tmpfile_module
 
-                    # Generar candidatos Shorts (Short puts) basados en delta
-                    shorts_list = gen_short_put_candidates_by_delta(
-                        puts1_idx, strikes_puts1, spot, dte_map[e1], r_base,
-                        delta_min=SHORT_PUT_DELTA_MIN,
-                        delta_max=SHORT_PUT_DELTA_MAX
-                    )
+                    # Crear archivo temporal CSV para escritura incremental
+                    temp_csv_fd, temp_csv_path = tmpfile_module.mkstemp(suffix=".csv", prefix="allantis_incr_", dir=temp_dir)
+                    os.close(temp_csv_fd)  # Cerrar descriptor, usaremos open() normal
+                    print(f"     [INCREMENTAL] Archivo temporal: {temp_csv_path}")
 
-                    # Generar candidatos LL (Lower Line puts) basados en delta
-                    ll_list = gen_ll_put_candidates_by_delta(
-                        puts1_idx, strikes_puts1, spot, dte_map[e1], r_base,
-                        delta_min=LL_PUT_DELTA_MIN,
-                        delta_max=LL_PUT_DELTA_MAX
-                    )
+                    csv_writer = None
+                    csv_file_handle = None
+                    total_candidates_written = 0
+                    total_combinations = 0
 
-                    # Generar candidatos Short Calls @ DTE1 basados en delta
-                    call_list = gen_short_call_candidates_by_delta(
-                        calls1_idx, strikes_calls1, spot, dte_map[e1], r_base,
-                        delta_min=SHORT_CALL_DELTA_MIN,
-                        delta_max=SHORT_CALL_DELTA_MAX
-                    )
+                    # Calcular número total de combinaciones para progreso
+                    for e1 in exp_A:
+                        calls1, puts1, _, _ = precache[e1]
+                        strikes_puts1 = sorted(set(puts1["strike"].tolist()))
+                        strikes_calls1 = sorted(set(calls1["strike"].tolist()))
+                        puts1_idx = puts1.set_index("strike")
+                        calls1_idx = calls1.set_index("strike")
 
-                    if not ul_list or not shorts_list or not ll_list or not call_list:
-                        continue
+                        ul_list = gen_ul_put_candidates_by_delta(puts1_idx, strikes_puts1, spot, dte_map[e1], r_base, UL_PUT_DELTA_MIN, UL_PUT_DELTA_MAX)
+                        if not ul_list:
+                            continue
 
-                    for e2 in exp_B:
-                        calls2, _, _, _ = precache[e2]
+                        for e2 in exp_B:
+                            total_combinations += len(ul_list)
 
-                        # Crear tareas para cada k_ul
-                        for k_ul in ul_list:
-                            task = (
-                                k_ul, shorts_list, ll_list, call_list, e1, e2, dte_map, spot, r_base,
-                                date_es_str, hhmm_es, _hhmm_us, base_idx,
-                                puts1.reset_index(drop=True),   # DataFrame serializable
-                                calls1.reset_index(drop=True),  # DataFrame serializable
-                                calls2.reset_index(drop=True),  # DataFrame serializable
-                                FRAC_SUFFIXES, USE_LIQUIDITY_FILTERS,
-                                MIN_OI_FRONT, MIN_VOL_FRONT, MIN_OI_BACK, MIN_VOL_BACK,
-                                PREFILTER_CREDIT_MIN, PREFILTER_CREDIT_MAX
-                            )
-                            tasks.append(task)
+                    print(f"     [INCREMENTAL] Total de combinaciones a procesar: {total_combinations}")
 
-                # Ejecutar en paralelo si hay tareas - PROCESAMIENTO POR LOTES (evita MemoryError)
-                if tasks:
-                    import os as os_module
-                    num_workers = os_module.cpu_count() or 1
-                    total_tasks = len(tasks)
-                    print(f"     [PARALLEL] Procesando {total_tasks} tareas Allantis con {num_workers} workers...")
+                    # Procesar combinaciones incrementalmente
+                    comb_idx = 0
+                    for e1_idx, e1 in enumerate(exp_A, start=1):
+                        calls1, puts1, _, _ = precache[e1]
+                        strikes_puts1 = sorted(set(puts1["strike"].tolist()))
+                        strikes_calls1 = sorted(set(calls1["strike"].tolist()))
 
-                    # Dividir tareas en lotes (chunks) para reducir presión de memoria
-                    batch_size = PARALLEL_BATCH_SIZE
-                    num_batches = (total_tasks + batch_size - 1) // batch_size  # Redondeo hacia arriba
-                    print(f"     [PARALLEL] Dividiendo en {num_batches} lotes de ~{batch_size} tareas cada uno...")
+                        puts1_idx = puts1.set_index("strike")
+                        calls1_idx = calls1.set_index("strike")
 
-                    tasks_completed = 0
-                    for batch_num in range(num_batches):
-                        # Extraer el lote actual
-                        start_idx = batch_num * batch_size
-                        end_idx = min(start_idx + batch_size, total_tasks)
-                        batch_tasks = tasks[start_idx:end_idx]
-                        batch_len = len(batch_tasks)
+                        print(f"     [INCREMENTAL] Exp1 {e1_idx}/{len(exp_A)}: {e1} (DTE={dte_map[e1]})")
 
-                        print(f"     [PARALLEL] Procesando lote {batch_num + 1}/{num_batches} ({batch_len} tareas)...")
+                        # Generar candidatos
+                        ul_list = gen_ul_put_candidates_by_delta(puts1_idx, strikes_puts1, spot, dte_map[e1], r_base, UL_PUT_DELTA_MIN, UL_PUT_DELTA_MAX)
+                        shorts_list = gen_short_put_candidates_by_delta(puts1_idx, strikes_puts1, spot, dte_map[e1], r_base, SHORT_PUT_DELTA_MIN, SHORT_PUT_DELTA_MAX)
+                        ll_list = gen_ll_put_candidates_by_delta(puts1_idx, strikes_puts1, spot, dte_map[e1], r_base, LL_PUT_DELTA_MIN, LL_PUT_DELTA_MAX)
+                        call_list = gen_short_call_candidates_by_delta(calls1_idx, strikes_calls1, spot, dte_map[e1], r_base, SHORT_CALL_DELTA_MIN, SHORT_CALL_DELTA_MAX)
 
-                        # Procesar lote con ProcessPoolExecutor
-                        with ProcessPoolExecutor(max_workers=num_workers) as executor:
-                            # Iteración lazy sobre resultados del lote actual
-                            for task_idx, result in enumerate(executor.map(_process_allantis_candidate, batch_tasks), start=1):
-                                rows.extend(result)
-                                tasks_completed += 1
+                        if not ul_list or not shorts_list or not ll_list or not call_list:
+                            print(f"       → Sin candidatos válidos para exp1={e1}")
+                            continue
 
-                                # Mostrar progreso global
-                                if tasks_completed % max(1, total_tasks // 10) == 0 or tasks_completed == total_tasks:
-                                    progress_pct = 100 * tasks_completed / total_tasks
-                                    print(f"     [PARALLEL] Progreso candidatos: {tasks_completed}/{total_tasks} ({progress_pct:.1f}%)")
+                        print(f"       → UL:{len(ul_list)} Shorts:{len(shorts_list)} LL:{len(ll_list)} Calls:{len(call_list)}")
 
-                        print(f"     [PARALLEL] Lote {batch_num + 1}/{num_batches} completado. Total acumulado: {len(rows)} candidatos.")
+                        for e2_idx, e2 in enumerate(exp_B, start=1):
+                            calls2, _, _, _ = precache[e2]
+                            print(f"       [INCREMENTAL] Exp2 {e2_idx}/{len(exp_B)}: {e2} (DTE={dte_map[e2]})")
 
-                    print(f"     [PARALLEL] Completado. {len(rows)} candidatos Allantis generados.")
+                            # Procesar cada k_ul individualmente
+                            for ul_idx, k_ul in enumerate(ul_list, start=1):
+                                comb_idx += 1
+
+                                # Log detallado cada combinación
+                                if comb_idx % 10 == 0 or comb_idx == total_combinations:
+                                    progress_pct = 100 * comb_idx / max(1, total_combinations)
+                                    print(f"       [INCR {comb_idx}/{total_combinations} ({progress_pct:.1f}%)] E1={e1} E2={e2} UL={k_ul:.0f} → Procesando...")
+
+                                # Preparar tarea
+                                task = (
+                                    k_ul, shorts_list, ll_list, call_list, e1, e2, dte_map, spot, r_base,
+                                    date_es_str, hhmm_es, _hhmm_us, base_idx,
+                                    puts1.reset_index(drop=True),
+                                    calls1.reset_index(drop=True),
+                                    calls2.reset_index(drop=True),
+                                    FRAC_SUFFIXES, USE_LIQUIDITY_FILTERS,
+                                    MIN_OI_FRONT, MIN_VOL_FRONT, MIN_OI_BACK, MIN_VOL_BACK,
+                                    PREFILTER_CREDIT_MIN, PREFILTER_CREDIT_MAX
+                                )
+
+                                # Procesar inmediatamente (sin acumular)
+                                if INCREMENTAL_WORKERS == 1:
+                                    # Modo secuencial (mínima memoria)
+                                    result_rows = _process_allantis_candidate(task)
+                                else:
+                                    # Modo semi-paralelo (procesar con pool pequeño)
+                                    with ProcessPoolExecutor(max_workers=INCREMENTAL_WORKERS) as micro_executor:
+                                        result_rows = list(micro_executor.map(_process_allantis_candidate, [task]))[0]
+
+                                # Escribir inmediatamente si hay resultados
+                                if result_rows:
+                                    if csv_writer is None:
+                                        # Primera escritura: crear header
+                                        csv_file_handle = open(temp_csv_path, 'w', newline='', encoding='utf-8')
+                                        csv_writer = csv.DictWriter(csv_file_handle, fieldnames=result_rows[0].keys())
+                                        csv_writer.writeheader()
+
+                                    csv_writer.writerows(result_rows)
+                                    csv_file_handle.flush()  # Forzar escritura a disco
+                                    total_candidates_written += len(result_rows)
+
+                                    if comb_idx % 10 == 0 or comb_idx == total_combinations:
+                                        print(f"         ✓ Escritos {len(result_rows)} candidatos → Total acum: {total_candidates_written}")
+
+                                # Liberar memoria inmediatamente
+                                del result_rows
+
+                    # Cerrar archivo CSV
+                    if csv_file_handle:
+                        csv_file_handle.close()
+
+                    print(f"     [INCREMENTAL] Completado. {total_candidates_written} candidatos escritos en {temp_csv_path}")
+
+                    # Leer CSV y convertir a rows para compatibilidad con código posterior
+                    if total_candidates_written > 0:
+                        import pandas as pd
+                        df_temp = pd.read_csv(temp_csv_path)
+                        rows = df_temp.to_dict('records')
+                        print(f"     [INCREMENTAL] Cargados {len(rows)} candidatos desde archivo temporal")
+                        del df_temp
+                    else:
+                        rows = []
+
+                else:
+                    # ========== MODO BATCH: Acumula tareas y procesa en lotes ==========
+                    # Allantis: 5 patas (UL, Shorts, LL puts @ DTE1 + Short/Long calls)
+                    # Preparar todas las tareas de k_ul para procesamiento paralelo
+                    tasks = []
+                    for e1 in exp_A:
+                        calls1, puts1, _, _ = precache[e1]
+                        strikes_puts1 = sorted(set(puts1["strike"].tolist()))
+                        strikes_calls1 = sorted(set(calls1["strike"].tolist()))
+
+                        # Indexar por strike para búsqueda rápida
+                        puts1_idx = puts1.set_index("strike")
+                        calls1_idx = calls1.set_index("strike")
+
+                        # Generar candidatos UL (Upper Line puts) basados en delta
+                        ul_list = gen_ul_put_candidates_by_delta(
+                            puts1_idx, strikes_puts1, spot, dte_map[e1], r_base,
+                            delta_min=UL_PUT_DELTA_MIN,
+                            delta_max=UL_PUT_DELTA_MAX
+                        )
+
+                        # Generar candidatos Shorts (Short puts) basados en delta
+                        shorts_list = gen_short_put_candidates_by_delta(
+                            puts1_idx, strikes_puts1, spot, dte_map[e1], r_base,
+                            delta_min=SHORT_PUT_DELTA_MIN,
+                            delta_max=SHORT_PUT_DELTA_MAX
+                        )
+
+                        # Generar candidatos LL (Lower Line puts) basados en delta
+                        ll_list = gen_ll_put_candidates_by_delta(
+                            puts1_idx, strikes_puts1, spot, dte_map[e1], r_base,
+                            delta_min=LL_PUT_DELTA_MIN,
+                            delta_max=LL_PUT_DELTA_MAX
+                        )
+
+                        # Generar candidatos Short Calls @ DTE1 basados en delta
+                        call_list = gen_short_call_candidates_by_delta(
+                            calls1_idx, strikes_calls1, spot, dte_map[e1], r_base,
+                            delta_min=SHORT_CALL_DELTA_MIN,
+                            delta_max=SHORT_CALL_DELTA_MAX
+                        )
+
+                        if not ul_list or not shorts_list or not ll_list or not call_list:
+                            continue
+
+                        for e2 in exp_B:
+                            calls2, _, _, _ = precache[e2]
+
+                            # Crear tareas para cada k_ul
+                            for k_ul in ul_list:
+                                task = (
+                                    k_ul, shorts_list, ll_list, call_list, e1, e2, dte_map, spot, r_base,
+                                    date_es_str, hhmm_es, _hhmm_us, base_idx,
+                                    puts1.reset_index(drop=True),   # DataFrame serializable
+                                    calls1.reset_index(drop=True),  # DataFrame serializable
+                                    calls2.reset_index(drop=True),  # DataFrame serializable
+                                    FRAC_SUFFIXES, USE_LIQUIDITY_FILTERS,
+                                    MIN_OI_FRONT, MIN_VOL_FRONT, MIN_OI_BACK, MIN_VOL_BACK,
+                                    PREFILTER_CREDIT_MIN, PREFILTER_CREDIT_MAX
+                                )
+                                tasks.append(task)
+
+                    # Ejecutar en paralelo si hay tareas - PROCESAMIENTO POR LOTES (evita MemoryError)
+                    if tasks:
+                        import os as os_module
+                        num_workers = os_module.cpu_count() or 1
+                        total_tasks = len(tasks)
+                        print(f"     [PARALLEL] Procesando {total_tasks} tareas Allantis con {num_workers} workers...")
+
+                        # Dividir tareas en lotes (chunks) para reducir presión de memoria
+                        batch_size = PARALLEL_BATCH_SIZE
+                        num_batches = (total_tasks + batch_size - 1) // batch_size  # Redondeo hacia arriba
+                        print(f"     [PARALLEL] Dividiendo en {num_batches} lotes de ~{batch_size} tareas cada uno...")
+
+                        tasks_completed = 0
+                        for batch_num in range(num_batches):
+                            # Extraer el lote actual
+                            start_idx = batch_num * batch_size
+                            end_idx = min(start_idx + batch_size, total_tasks)
+                            batch_tasks = tasks[start_idx:end_idx]
+                            batch_len = len(batch_tasks)
+
+                            print(f"     [PARALLEL] Procesando lote {batch_num + 1}/{num_batches} ({batch_len} tareas)...")
+
+                            # Procesar lote con ProcessPoolExecutor
+                            with ProcessPoolExecutor(max_workers=num_workers) as executor:
+                                # Iteración lazy sobre resultados del lote actual
+                                for task_idx, result in enumerate(executor.map(_process_allantis_candidate, batch_tasks), start=1):
+                                    rows.extend(result)
+                                    tasks_completed += 1
+
+                                    # Mostrar progreso global
+                                    if tasks_completed % max(1, total_tasks // 10) == 0 or tasks_completed == total_tasks:
+                                        progress_pct = 100 * tasks_completed / total_tasks
+                                        print(f"     [PARALLEL] Progreso candidatos: {tasks_completed}/{total_tasks} ({progress_pct:.1f}%)")
+
+                            print(f"     [PARALLEL] Lote {batch_num + 1}/{num_batches} completado. Total acumulado: {len(rows)} candidatos.")
+
+                        print(f"     [PARALLEL] Completado. {len(rows)} candidatos Allantis generados.")
 
                 print(f"     Candidatos generados: {len(rows)}")
 
