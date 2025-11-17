@@ -5765,7 +5765,6 @@ def main():
 
                     # Leer CSV y convertir a rows para compatibilidad con código posterior
                     if total_candidates_written > 0:
-                        import pandas as pd
                         df_temp = pd.read_csv(temp_csv_path)
                         rows = df_temp.to_dict('records')
                         print(f"     [INCREMENTAL] Cargados {len(rows)} candidatos desde archivo temporal")
