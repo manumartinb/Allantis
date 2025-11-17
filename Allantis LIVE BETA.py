@@ -220,6 +220,12 @@ INCREMENTAL_WORKERS = 1      # ! [Solo modo incremental] Número de workers para
                              # 1 = secuencial (mínima memoria), 2-4 = semi-paralelo (balance)
                              # RECOMENDADO: 1 para evitar MemoryError, 2-4 si tienes RAM suficiente
 
+INCREMENTAL_SORT_INTERVAL = 10.0  # ! [Solo modo incremental] Intervalo de progreso (%) para ordenar el CSV temporal
+                                  # Cada vez que el progreso alcance este % (10%, 20%, 30%...), se ordenará el CSV
+                                  # según RANKING_MODE (AQI o theta_total) en orden descendente (mejores primero)
+                                  # Valores recomendados: 5.0-20.0 (más bajo = ordena más frecuentemente)
+                                  # 0 = deshabilitar ordenación periódica
+
 THETA_TO_DAILY = 100.0       # Multiplicador SPX para convertir puntos a USD
                              # Los theta_BS del snapshot ya vienen en formato diario (por día)
                              # Ejemplo: theta_BS = -2.847 puntos/día → -2.847 × 100 = -284.7 USD/día
@@ -3440,6 +3446,52 @@ def _process_k1_candidate(args):
 
     return rows
 
+def _sort_incremental_csv(csv_path: str, ranking_mode: str) -> int:
+    """
+    Ordena el CSV temporal del modo incremental según RANKING_MODE.
+
+    Args:
+        csv_path: Ruta al archivo CSV temporal
+        ranking_mode: Métrica para ordenar ("AQI" o "theta_total")
+
+    Returns:
+        Número de filas ordenadas, o 0 si no hay datos o error
+    """
+    import csv
+
+    try:
+        # Leer CSV completo
+        df_temp = pd.read_csv(csv_path)
+
+        if df_temp.empty:
+            return 0
+
+        num_rows = len(df_temp)
+
+        # Determinar columna de ordenación según RANKING_MODE
+        sort_column = ranking_mode  # "AQI" o "theta_total"
+
+        if sort_column not in df_temp.columns:
+            print(f"         [WARN] Columna '{sort_column}' no encontrada para ordenar, usando theta_total como fallback")
+            sort_column = "theta_total"
+            if sort_column not in df_temp.columns:
+                print(f"         [WARN] No se puede ordenar, columnas de ranking no disponibles")
+                return num_rows
+
+        # Ordenar descendente (mejores primero: mayor AQI o mayor theta_total)
+        df_temp = df_temp.sort_values(by=sort_column, ascending=False, na_position='last')
+
+        # Reescribir CSV ordenado
+        df_temp.to_csv(csv_path, index=False)
+
+        del df_temp
+
+        return num_rows
+
+    except Exception as e:
+        print(f"         [ERROR] Error al ordenar CSV incremental: {e}")
+        return 0
+
 def _process_allantis_candidate(args):
     """
     Worker para procesar un candidato Allantis en paralelo.
@@ -5665,6 +5717,7 @@ def main():
                     total_candidates_generated = 0  # Total antes de filtrar
                     total_candidates_filtered = 0   # Total filtrados (rechazados)
                     total_combinations = 0
+                    last_sort_milestone = 0  # Último % de progreso donde se ordenó
 
                     # Calcular número total de combinaciones para progreso
                     for e1 in exp_A:
@@ -5835,12 +5888,57 @@ def main():
                                     if comb_idx % 10 == 0 or comb_idx == total_combinations:
                                         print(f"         ✓ Escritos {len(result_rows)} candidatos → Total acum: {total_candidates_written}")
 
+                                # ========== ORDENACIÓN PERIÓDICA POR RANKING_MODE ==========
+                                # Ordenar CSV temporal cada vez que alcanzamos un hito de % de progreso
+                                if INCREMENTAL_SORT_INTERVAL > 0 and total_combinations > 0:
+                                    current_progress_pct = 100 * comb_idx / total_combinations
+                                    # Calcular hito actual (ej: si estamos en 23%, hito es 20)
+                                    current_milestone = int(current_progress_pct // INCREMENTAL_SORT_INTERVAL) * INCREMENTAL_SORT_INTERVAL
+
+                                    # Si alcanzamos un nuevo hito y tenemos datos escritos
+                                    if current_milestone > last_sort_milestone and total_candidates_written > 0:
+                                        print(f"         [SORT] Hito de progreso alcanzado: {current_milestone:.0f}% - Ordenando CSV por {RANKING_MODE}...")
+
+                                        # Cerrar archivo CSV temporalmente para ordenar
+                                        if csv_file_handle:
+                                            csv_file_handle.close()
+                                            csv_writer = None
+                                            csv_file_handle = None
+
+                                        # Ordenar CSV
+                                        num_sorted = _sort_incremental_csv(temp_csv_path, RANKING_MODE)
+
+                                        if num_sorted > 0:
+                                            print(f"         [SORT] ✓ Ordenadas {num_sorted} filas por {RANKING_MODE} (descendente)")
+
+                                        # Reabrir archivo CSV en modo append
+                                        csv_file_handle = open(temp_csv_path, 'a', newline='', encoding='utf-8')
+                                        # Obtener fieldnames del CSV existente para el writer
+                                        import csv as csv_module
+                                        with open(temp_csv_path, 'r', encoding='utf-8') as f_temp:
+                                            reader = csv_module.DictReader(f_temp)
+                                            fieldnames = reader.fieldnames
+                                        csv_writer = csv_module.DictWriter(csv_file_handle, fieldnames=fieldnames)
+
+                                        # Actualizar último hito
+                                        last_sort_milestone = current_milestone
+                                # ========== FIN ORDENACIÓN PERIÓDICA ==========
+
                                 # Liberar memoria inmediatamente
                                 del result_rows
 
                     # Cerrar archivo CSV
                     if csv_file_handle:
                         csv_file_handle.close()
+
+                    # ========== ORDENACIÓN FINAL ==========
+                    # Ordenar una última vez al completar el procesamiento
+                    if INCREMENTAL_SORT_INTERVAL > 0 and total_candidates_written > 0:
+                        print(f"     [SORT] Ordenación final del CSV por {RANKING_MODE}...")
+                        num_sorted = _sort_incremental_csv(temp_csv_path, RANKING_MODE)
+                        if num_sorted > 0:
+                            print(f"     [SORT] ✓ Ordenación final completada: {num_sorted} filas por {RANKING_MODE} (descendente)")
+                    # ========== FIN ORDENACIÓN FINAL ==========
 
                     # Mostrar estadísticas de filtrado
                     print(f"     [INCREMENTAL] Completado. Estadísticas de filtrado:")
