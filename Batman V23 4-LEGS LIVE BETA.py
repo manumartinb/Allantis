@@ -73,6 +73,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Optional, Any
 import logging
 import warnings
+import gc
 
 # Imports para módulo de análisis estadístico
 from scipy import stats
@@ -362,6 +363,140 @@ S_PNL = 8000                           # Spot SPX para gráficos de P&L (valor d
 
 # Caché greeks
 GREEKS_CACHE = {}
+
+# ================== OPTIMIZACIÓN DE MEMORIA ==================
+def optimize_dtypes(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Castea columnas numéricas a tipos más eficientes (float32, int32) para reducir memoria.
+    """
+    if df.empty:
+        return df
+
+    df_opt = df.copy()
+
+    # Float64 → Float32
+    float_cols = df_opt.select_dtypes(include=['float64']).columns
+    for col in float_cols:
+        df_opt[col] = df_opt[col].astype('float32')
+
+    # Int64 → Int32 (si cabe en rango)
+    int_cols = df_opt.select_dtypes(include=['int64']).columns
+    for col in int_cols:
+        col_min = df_opt[col].min() if not df_opt[col].isna().all() else 0
+        col_max = df_opt[col].max() if not df_opt[col].isna().all() else 0
+        # Rango int32: -2,147,483,648 a 2,147,483,647
+        if col_min >= -2147483648 and col_max <= 2147483647:
+            df_opt[col] = df_opt[col].astype('Int32')
+
+    return df_opt
+
+
+def optimize_dtypes_aggressive(df: pd.DataFrame, verbose: bool = False) -> pd.DataFrame:
+    """
+    Optimización AGRESIVA de tipos de datos para minimizar uso de memoria.
+
+    Aplica:
+    - float64 → float32 (reduce 50% memoria)
+    - int64 → int32/int16/int8 (según rango)
+    - object → category (para strings repetitivos, reduce 80-95% memoria)
+    - Identifica y optimiza fechas/timestamps
+
+    Esta función puede reducir el uso de memoria en 60-80% para DataFrames típicos.
+    """
+    if df.empty:
+        return df
+
+    if verbose:
+        mem_before = df.memory_usage(deep=True).sum() / (1024**2)
+        timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{timestamp_str}]   [OPTIMIZACIÓN] Iniciando optimización de {len(df):,} filas, {len(df.columns)} columnas...")
+        print(f"[{timestamp_str}]   [OPTIMIZACIÓN] Memoria antes: {mem_before:.1f} MB")
+
+    # Evitar modificar el original
+    df = df.copy()
+
+    # 1. Float64 → Float32
+    float_cols = df.select_dtypes(include=['float64']).columns
+    if verbose and len(float_cols) > 0:
+        timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{timestamp_str}]   [PASO 1/3] Convirtiendo {len(float_cols)} columnas float64 → float32...", end='', flush=True)
+
+    for col in float_cols:
+        df[col] = df[col].astype('float32')
+
+    if verbose and len(float_cols) > 0:
+        print(" ✓")
+
+    # 2. Int64 → Int32/Int16/Int8 (según rango)
+    int_cols = df.select_dtypes(include=['int64']).columns
+    if verbose and len(int_cols) > 0:
+        timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{timestamp_str}]   [PASO 2/3] Optimizando {len(int_cols)} columnas int64 → int32/int16/int8...", end='', flush=True)
+
+    int8_count = 0
+    int16_count = 0
+    int32_count = 0
+
+    for col in int_cols:
+        if df[col].isna().all():
+            continue
+
+        col_min = df[col].min()
+        col_max = df[col].max()
+
+        # Intentar int8 (-128 a 127)
+        if col_min >= -128 and col_max <= 127:
+            df[col] = df[col].astype('int8')
+            int8_count += 1
+        # Intentar int16 (-32,768 a 32,767)
+        elif col_min >= -32768 and col_max <= 32767:
+            df[col] = df[col].astype('int16')
+            int16_count += 1
+        # Intentar int32
+        elif col_min >= -2147483648 and col_max <= 2147483647:
+            df[col] = df[col].astype('int32')
+            int32_count += 1
+        # Quedarse en int64
+
+    if verbose and len(int_cols) > 0:
+        print(f" ✓ (int8: {int8_count}, int16: {int16_count}, int32: {int32_count})")
+
+    # 3. Object → Category (CRÍTICO para reducir memoria)
+    # Esto es especialmente efectivo para columnas con valores repetidos
+    obj_cols = df.select_dtypes(include=['object']).columns
+
+    if verbose and len(obj_cols) > 0:
+        timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{timestamp_str}]   [PASO 3/3] Analizando {len(obj_cols)} columnas object → category...", end='', flush=True)
+
+    category_count = 0
+    for col in obj_cols:
+        num_unique = df[col].nunique()
+        num_total = len(df[col])
+
+        # Si hay menos del 50% de valores únicos, convertir a category
+        # Category es muy eficiente cuando hay repetición
+        if num_unique < num_total * 0.5:
+            df[col] = df[col].astype('category')
+            category_count += 1
+
+    if verbose and len(obj_cols) > 0:
+        print(f" ✓ ({category_count}/{len(obj_cols)} convertidas a category)")
+
+    # 4. Datetime optimization (si hay columnas de fecha)
+    # Pandas datetime64[ns] usa 8 bytes, podemos reducir a datetime64[ms] (4 bytes) si no necesitamos nanosegundos
+    datetime_cols = df.select_dtypes(include=['datetime64']).columns
+    for col in datetime_cols:
+        # Mantener como datetime64[ns] pero asegurarnos que no haya NaT innecesarios
+        pass  # Por ahora no optimizar datetime, es complejo y puede romper lógica
+
+    if verbose:
+        mem_after = df.memory_usage(deep=True).sum() / (1024**2)
+        reduction_pct = 100 * (1 - mem_after / mem_before)
+        timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{timestamp_str}]   [OPTIMIZACIÓN] Memoria después: {mem_after:.1f} MB ({reduction_pct:.1f}% reducción)")
+
+    return df
 
 # ================== HELPERS ==================
 def safe_filename(text: str) -> str:
@@ -1999,6 +2134,8 @@ def _process_one_fwd_batman(args):
             fwd_df = pd.read_csv(fwd_path)
             if fwd_df.empty:
                 continue
+            # Optimizar tipos de datos inmediatamente para reducir memoria
+            fwd_df = optimize_dtypes(fwd_df)
             fwd_df = td_rescale_strike_only(fwd_df)
 
             # Acumuladores para mediana sobre 14 timestamps
@@ -2444,6 +2581,9 @@ def load_and_clean(params: AnalysisParams) -> Tuple[pd.DataFrame, str]:
         raise FileNotFoundError(f"El archivo no existe: {params.csv_path}")
 
     df = pd.read_csv(params.csv_path)
+    # Optimizar tipos de datos inmediatamente para reducir memoria
+    logger.info("Optimizando tipos de datos del CSV cargado...")
+    df = optimize_dtypes_aggressive(df, verbose=True)
     n_original = len(df)
     logger.info(f"Filas originales: {n_original:,}")
 
@@ -4440,6 +4580,8 @@ def main():
             df = pd.read_csv(chosen_file)
             if df.empty:
                 print("[×] Archivo de opciones vacío."); continue
+            # Optimizar tipos de datos inmediatamente para reducir memoria
+            df = optimize_dtypes(df)
             df = td_rescale_strike_only(df)
 
             # Cadena canónica (día completo, sin descartar por spread en selección)
@@ -5719,6 +5861,8 @@ def main():
 
                     base_path = matching_files[0]
                     base_df = pd.read_csv(base_path)
+                    # Optimizar tipos de datos inmediatamente para reducir memoria
+                    base_df = optimize_dtypes(base_df)
                     base_df = td_rescale_strike_only(base_df)
                     _base_day_cache[dia_str] = base_df
                     return base_df
