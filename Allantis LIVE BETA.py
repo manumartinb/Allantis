@@ -5662,6 +5662,8 @@ def main():
                     csv_writer = None
                     csv_file_handle = None
                     total_candidates_written = 0
+                    total_candidates_generated = 0  # Total antes de filtrar
+                    total_candidates_filtered = 0   # Total filtrados (rechazados)
                     total_combinations = 0
 
                     # Calcular número total de combinaciones para progreso
@@ -5739,7 +5741,86 @@ def main():
                                     with ProcessPoolExecutor(max_workers=INCREMENTAL_WORKERS) as micro_executor:
                                         result_rows = list(micro_executor.map(_process_allantis_candidate, [task]))[0]
 
-                                # Escribir inmediatamente si hay resultados
+                                # ========== APLICAR TODOS LOS FILTROS ANTES DE ESCRIBIR ==========
+                                # MODO INCREMENTAL: Filtrar result_rows para eliminar "basura" antes de escribir al CSV
+                                # Aplica TODOS los filtros configurados para reducir datos temporales:
+                                #   - NET_CREDIT (PREFILTER_CREDIT_MIN/MAX)
+                                #   - DELTA_TOTAL (DELTA_MIN/MAX)
+                                #   - THETA_TOTAL (THETA_MIN/MAX)
+                                #   - UEL_inf_USD (UEL_INF_MIN/MAX)
+                                #   - PnLDV (si FILTER_PNLDV_ENABLED)
+                                #   - AQI (si FILTER_AQI_ENABLED - AQI_MIN/MAX)
+                                #   - LEL (si FILTER_LEL_ENABLED - LEL_MIN/MAX)
+                                #   - UEL (si FILTER_UEL_ENABLED - UEL_MIN/MAX)
+                                # Solo las filas que pasen TODOS los filtros se escriben al CSV temporal
+                                candidates_before_filter = len(result_rows) if result_rows else 0
+                                if result_rows:
+                                    filtered_rows = []
+                                    for row in result_rows:
+                                        # Aplicar todos los filtros configurados
+                                        passes_filters = True
+
+                                        # Filtro NET_CREDIT
+                                        if "net_credit" in row:
+                                            if not (PREFILTER_CREDIT_MIN <= row["net_credit"] <= PREFILTER_CREDIT_MAX):
+                                                passes_filters = False
+
+                                        # Filtro DELTA_TOTAL
+                                        if passes_filters and "delta_total" in row:
+                                            if not (DELTA_MIN <= row["delta_total"] <= DELTA_MAX):
+                                                passes_filters = False
+
+                                        # Filtro THETA_TOTAL
+                                        if passes_filters and "theta_total" in row:
+                                            if not (THETA_MIN <= row["theta_total"] <= THETA_MAX):
+                                                passes_filters = False
+
+                                        # Filtro UEL_inf_USD
+                                        if passes_filters and "UEL_inf_USD" in row:
+                                            if not (UEL_INF_MIN <= row["UEL_inf_USD"] <= UEL_INF_MAX):
+                                                passes_filters = False
+
+                                        # Filtro PnLDV (si está habilitado)
+                                        if passes_filters and FILTER_PNLDV_ENABLED and "PnLDV" in row:
+                                            if row["PnLDV"] is None or pd.isna(row["PnLDV"]):
+                                                passes_filters = False
+                                            elif not (PNLDV_MIN <= row["PnLDV"] <= PNLDV_MAX):
+                                                passes_filters = False
+
+                                        # Filtro AQI (si está habilitado)
+                                        if passes_filters and FILTER_AQI_ENABLED and "AQI" in row:
+                                            if row["AQI"] is None or pd.isna(row["AQI"]):
+                                                passes_filters = False
+                                            elif not (AQI_MIN <= row["AQI"] <= AQI_MAX):
+                                                passes_filters = False
+
+                                        # Filtro LEL (si está habilitado)
+                                        if passes_filters and FILTER_LEL_ENABLED and "LEL_pts" in row:
+                                            if row["LEL_pts"] is None or pd.isna(row["LEL_pts"]):
+                                                passes_filters = False
+                                            elif not (LEL_MIN <= row["LEL_pts"] <= LEL_MAX):
+                                                passes_filters = False
+
+                                        # Filtro UEL (si está habilitado)
+                                        if passes_filters and FILTER_UEL_ENABLED and "UEL_pts" in row:
+                                            if row["UEL_pts"] is None or pd.isna(row["UEL_pts"]):
+                                                passes_filters = False
+                                            elif not (UEL_MIN <= row["UEL_pts"] <= UEL_MAX):
+                                                passes_filters = False
+
+                                        # Si pasa todos los filtros, agregar a filtered_rows
+                                        if passes_filters:
+                                            filtered_rows.append(row)
+
+                                    # Actualizar estadísticas
+                                    total_candidates_generated += candidates_before_filter
+                                    candidates_filtered = candidates_before_filter - len(filtered_rows)
+                                    total_candidates_filtered += candidates_filtered
+
+                                    result_rows = filtered_rows  # Reemplazar con filas filtradas
+                                # ========== FIN FILTRADO ==========
+
+                                # Escribir inmediatamente si hay resultados (ya filtrados)
                                 if result_rows:
                                     if csv_writer is None:
                                         # Primera escritura: crear header
@@ -5761,7 +5842,16 @@ def main():
                     if csv_file_handle:
                         csv_file_handle.close()
 
-                    print(f"     [INCREMENTAL] Completado. {total_candidates_written} candidatos escritos en {temp_csv_path}")
+                    # Mostrar estadísticas de filtrado
+                    print(f"     [INCREMENTAL] Completado. Estadísticas de filtrado:")
+                    print(f"       - Candidatos generados: {total_candidates_generated}")
+                    print(f"       - Candidatos filtrados (rechazados): {total_candidates_filtered}")
+                    print(f"       - Candidatos escritos (pasaron filtros): {total_candidates_written}")
+                    if total_candidates_generated > 0:
+                        pct_filtered = 100 * total_candidates_filtered / total_candidates_generated
+                        pct_written = 100 * total_candidates_written / total_candidates_generated
+                        print(f"       - Tasa de filtrado: {pct_filtered:.1f}% rechazados, {pct_written:.1f}% aceptados")
+                    print(f"     [INCREMENTAL] Archivo temporal: {temp_csv_path}")
 
                     # Leer CSV y convertir a rows para compatibilidad con código posterior
                     if total_candidates_written > 0:
@@ -5937,7 +6027,10 @@ def main():
 
         print(f"\n{'='*70}")
         print(f"CONSOLIDANDO {len(parquet_files)} archivos Parquet...")
-        print(f"APLICANDO PREFILTROS Y ESCRIBIENDO INCREMENTAL (sin acumular en RAM)...")
+        if INCREMENTAL_MODE:
+            print(f"[INCREMENTAL] Los filtros ya fueron aplicados durante procesamiento - Solo consolidando...")
+        else:
+            print(f"APLICANDO PREFILTROS Y ESCRIBIENDO INCREMENTAL (sin acumular en RAM)...")
         print(f"{'='*70}")
         writer = None
         schema = None
@@ -5949,58 +6042,64 @@ def main():
             filas_antes = len(df_chunk)
             total_filas_leidas += filas_antes
 
-            # ========== FASE 1: Prefiltros básicos (ya existentes) ==========
-            mask = pd.Series(True, index=df_chunk.index)
+            # ========== FASE 1: Prefiltros básicos ==========
+            # NOTA: En modo INCREMENTAL estos filtros ya fueron aplicados durante procesamiento
+            # Solo se aplican en modo BATCH
+            if not INCREMENTAL_MODE:
+                mask = pd.Series(True, index=df_chunk.index)
 
-            # Prefiltro NET_CREDIT
-            if "net_credit" in df_chunk.columns:
-                mask &= (df_chunk["net_credit"] <= PREFILTER_CREDIT_MAX) & (df_chunk["net_credit"] >= PREFILTER_CREDIT_MIN)
+                # Prefiltro NET_CREDIT
+                if "net_credit" in df_chunk.columns:
+                    mask &= (df_chunk["net_credit"] <= PREFILTER_CREDIT_MAX) & (df_chunk["net_credit"] >= PREFILTER_CREDIT_MIN)
 
-            # Prefiltro DELTA_TOTAL
-            if "delta_total" in df_chunk.columns:
-                mask &= (df_chunk["delta_total"] >= DELTA_MIN) & (df_chunk["delta_total"] <= DELTA_MAX)
+                # Prefiltro DELTA_TOTAL
+                if "delta_total" in df_chunk.columns:
+                    mask &= (df_chunk["delta_total"] >= DELTA_MIN) & (df_chunk["delta_total"] <= DELTA_MAX)
 
-            # Prefiltro THETA_TOTAL
-            if "theta_total" in df_chunk.columns:
-                mask &= (df_chunk["theta_total"] >= THETA_MIN) & (df_chunk["theta_total"] <= THETA_MAX)
+                # Prefiltro THETA_TOTAL
+                if "theta_total" in df_chunk.columns:
+                    mask &= (df_chunk["theta_total"] >= THETA_MIN) & (df_chunk["theta_total"] <= THETA_MAX)
 
-            # Prefiltro UEL_inf_USD
-            if "UEL_inf_USD" in df_chunk.columns:
-                mask &= (df_chunk["UEL_inf_USD"] >= UEL_INF_MIN) & (df_chunk["UEL_inf_USD"] <= UEL_INF_MAX)
+                # Prefiltro UEL_inf_USD
+                if "UEL_inf_USD" in df_chunk.columns:
+                    mask &= (df_chunk["UEL_inf_USD"] >= UEL_INF_MIN) & (df_chunk["UEL_inf_USD"] <= UEL_INF_MAX)
 
-            # RATIO_UEL_EARS eliminado - no aplica para Allantis
+                # RATIO_UEL_EARS eliminado - no aplica para Allantis
 
-            # Aplicar máscara de prefiltros básicos
-            df_chunk = df_chunk[mask]
-            del mask
+                # Aplicar máscara de prefiltros básicos
+                df_chunk = df_chunk[mask]
+                del mask
 
             # ========== FASE 2: AQI (Allantis Quality Index) ==========
             # AQI ya se calcula en process_one_allantis() y está disponible en el CSV
             # Balancea LEL, UEL, picos BWB/CCAL, valle, theta, MASTER_DISTANCE
             # No es necesario calcular nada aquí - AQI viene en los datos
 
-            # ========== FASE 3: Filtros avanzados (PnLDV, AQI) ==========
-            mask_advanced = pd.Series(True, index=df_chunk.index)
+            # ========== FASE 3: Filtros avanzados (PnLDV, AQI, LEL, UEL) ==========
+            # NOTA: En modo INCREMENTAL estos filtros ya fueron aplicados durante procesamiento
+            # Solo se aplican en modo BATCH
+            if not INCREMENTAL_MODE:
+                mask_advanced = pd.Series(True, index=df_chunk.index)
 
-            # Filtro PnLDV (si está habilitado) - DESHABILITADO para Allantis
-            if FILTER_PNLDV_ENABLED and "PnLDV" in df_chunk.columns:
-                mask_advanced &= df_chunk["PnLDV"].notna() & (df_chunk["PnLDV"] >= PNLDV_MIN) & (df_chunk["PnLDV"] <= PNLDV_MAX)
+                # Filtro PnLDV (si está habilitado) - DESHABILITADO para Allantis
+                if FILTER_PNLDV_ENABLED and "PnLDV" in df_chunk.columns:
+                    mask_advanced &= df_chunk["PnLDV"].notna() & (df_chunk["PnLDV"] >= PNLDV_MIN) & (df_chunk["PnLDV"] <= PNLDV_MAX)
 
-            # Filtro AQI (Allantis Quality Index)
-            if FILTER_AQI_ENABLED and "AQI" in df_chunk.columns:
-                mask_advanced &= df_chunk["AQI"].notna() & (df_chunk["AQI"] >= AQI_MIN) & (df_chunk["AQI"] <= AQI_MAX)
+                # Filtro AQI (Allantis Quality Index)
+                if FILTER_AQI_ENABLED and "AQI" in df_chunk.columns:
+                    mask_advanced &= df_chunk["AQI"].notna() & (df_chunk["AQI"] >= AQI_MIN) & (df_chunk["AQI"] <= AQI_MAX)
 
-            # Filtro LEL (Lower Expected Loss - Asíntota inferior)
-            if FILTER_LEL_ENABLED and "LEL_pts" in df_chunk.columns:
-                mask_advanced &= df_chunk["LEL_pts"].notna() & (df_chunk["LEL_pts"] >= LEL_MIN) & (df_chunk["LEL_pts"] <= LEL_MAX)
+                # Filtro LEL (Lower Expected Loss - Asíntota inferior)
+                if FILTER_LEL_ENABLED and "LEL_pts" in df_chunk.columns:
+                    mask_advanced &= df_chunk["LEL_pts"].notna() & (df_chunk["LEL_pts"] >= LEL_MIN) & (df_chunk["LEL_pts"] <= LEL_MAX)
 
-            # Filtro UEL (Upper Expected Loss - Asíntota superior)
-            if FILTER_UEL_ENABLED and "UEL_pts" in df_chunk.columns:
-                mask_advanced &= df_chunk["UEL_pts"].notna() & (df_chunk["UEL_pts"] >= UEL_MIN) & (df_chunk["UEL_pts"] <= UEL_MAX)
+                # Filtro UEL (Upper Expected Loss - Asíntota superior)
+                if FILTER_UEL_ENABLED and "UEL_pts" in df_chunk.columns:
+                    mask_advanced &= df_chunk["UEL_pts"].notna() & (df_chunk["UEL_pts"] >= UEL_MIN) & (df_chunk["UEL_pts"] <= UEL_MAX)
 
-            # Aplicar filtros avanzados
-            df_chunk = df_chunk[mask_advanced]
-            del mask_advanced
+                # Aplicar filtros avanzados
+                df_chunk = df_chunk[mask_advanced]
+                del mask_advanced
 
             filas_despues = len(df_chunk)
             total_filas_filtradas += filas_despues
@@ -6016,7 +6115,10 @@ def main():
                 del table
 
             del df_chunk
-            print(f"  - Procesado: {pq_file.name} ({filas_antes} → {filas_despues} filas tras prefiltros+BQI_ABS+filtros)")
+            if INCREMENTAL_MODE:
+                print(f"  - Procesado: {pq_file.name} ({filas_antes} filas - ya filtradas durante procesamiento)")
+            else:
+                print(f"  - Procesado: {pq_file.name} ({filas_antes} → {filas_despues} filas tras prefiltros+filtros)")
 
         # Cerrar writer
         if writer is not None:
@@ -6026,9 +6128,13 @@ def main():
             print("\n[!] ADVERTENCIA: No quedan filas después de aplicar prefiltros")
             return
 
-        print(f"\n[✓] Consolidación incremental completada: {total_filas_leidas} filas → {total_filas_filtradas} filas tras prefiltros")
-        print(f"[✓] Reducción: {100*(1-total_filas_filtradas/total_filas_leidas):.1f}% eliminadas")
-        print(f"[✓] Archivo consolidado: {consolidated_path}")
+        if INCREMENTAL_MODE:
+            print(f"\n[✓] Consolidación completada: {total_filas_leidas} filas (ya filtradas durante procesamiento)")
+            print(f"[✓] Archivo consolidado: {consolidated_path}")
+        else:
+            print(f"\n[✓] Consolidación incremental completada: {total_filas_leidas} filas → {total_filas_filtradas} filas tras prefiltros")
+            print(f"[✓] Reducción: {100*(1-total_filas_filtradas/total_filas_leidas):.1f}% eliminadas")
+            print(f"[✓] Archivo consolidado: {consolidated_path}")
 
     # ============================================================
     # CARGA SEGURA CON GESTIÓN DE MEMORIA
