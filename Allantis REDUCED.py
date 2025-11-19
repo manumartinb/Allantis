@@ -5639,22 +5639,22 @@ def main():
                         # Generar candidatos UL (Upper Line puts) basados en delta
                         ul_list = gen_uw_put_candidates_by_delta(
                             puts1_idx, strikes_puts1, spot, dte_map[e1], r_base,
-                            delta_min=UL_PUT_DELTA_MIN,
-                            delta_max=UL_PUT_DELTA_MAX
+                            delta_min=UW_PUT_DELTA_MIN,
+                            delta_max=UW_PUT_DELTA_MAX
                         )
 
                         # Generar candidatos Shorts (Short puts) basados en delta
                         shorts_list = gen_body_put_candidates_by_delta(
                             puts1_idx, strikes_puts1, spot, dte_map[e1], r_base,
-                            delta_min=SHORT_PUT_DELTA_MIN,
-                            delta_max=SHORT_PUT_DELTA_MAX
+                            delta_min=BODY_PUT_DELTA_MIN,
+                            delta_max=BODY_PUT_DELTA_MAX
                         )
 
                         # Generar candidatos LL (Lower Line puts) basados en delta
                         ll_list = gen_lw_put_candidates_by_delta(
                             puts1_idx, strikes_puts1, spot, dte_map[e1], r_base,
-                            delta_min=LL_PUT_DELTA_MIN,
-                            delta_max=LL_PUT_DELTA_MAX
+                            delta_min=LW_PUT_DELTA_MIN,
+                            delta_max=LW_PUT_DELTA_MAX
                         )
 
                         # Generar candidatos Short Calls @ DTE1 basados en delta
