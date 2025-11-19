@@ -5418,19 +5418,17 @@ def main():
                     print("     [!] Sin expiraciones en este minuto."); continue
                 dte_map = compute_dte_map(expirations, date_str_us)
 
-                # Usar TODAS las expiraciones en RANGE_A y RANGE_B, ordenadas por DTE ascendente
+                # Usar TODAS las expiraciones en RANGE_A, ordenadas por DTE ascendente
                 exp_A_all=[e for e in expirations if RANGE_A[0]<=dte_map[e]<=RANGE_A[1]]
-                exp_B_all=[e for e in expirations if RANGE_B[0]<=dte_map[e]<=RANGE_B[1]]
                 exp_A = sorted(exp_A_all, key=lambda e: dte_map[e])
-                exp_B = sorted(exp_B_all, key=lambda e: dte_map[e])
 
-                print(f"     Expiraciones únicas cargadas: {len(set(exp_A)|set(exp_B))}")
-                print(f"     Combos brutos aprox.: {len(exp_A)}*{len(exp_B)}*|K1|*|K2|*|K3| (cómputo local)")
+                print(f"     Expiraciones únicas cargadas: {len(exp_A)}")
+                print(f"     Combos brutos aprox.: {len(exp_A)}*|K1|*|K2|*|K3| (cómputo local)")
 
                 rows=[]
 
-                # ========== SELECCIÓN DE CANDIDATOS ALLANTIS ==========
-                print(f"     [INFO] Generando combinaciones de estructuras Allantis...")
+                # ========== SELECCIÓN DE CANDIDATOS BUTTERFLY ==========
+                print(f"     [INFO] Generando combinaciones de estructuras Butterfly...")
 
                 # MODO INCREMENTAL vs BATCH
                 if INCREMENTAL_MODE:
@@ -5455,186 +5453,150 @@ def main():
 
                     # Calcular número total de combinaciones para progreso
                     for e1 in exp_A:
-                        calls1, puts1, _, _ = precache[e1]
+                        _, puts1, _, _ = precache[e1]
                         strikes_puts1 = sorted(set(puts1["strike"].tolist()))
-                        strikes_calls1 = sorted(set(calls1["strike"].tolist()))
                         puts1_idx = puts1.set_index("strike")
-                        calls1_idx = calls1.set_index("strike")
 
-                        ul_list = gen_uw_put_candidates_by_delta(puts1_idx, strikes_puts1, spot, dte_map[e1], r_base, UL_PUT_DELTA_MIN, UL_PUT_DELTA_MAX)
-                        if not ul_list:
+                        uw_list = gen_uw_put_candidates_by_delta(puts1_idx, strikes_puts1, spot, dte_map[e1], r_base, UW_PUT_DELTA_MIN, UW_PUT_DELTA_MAX)
+                        if not uw_list:
                             continue
 
-                        for e2 in exp_B:
-                            total_combinations += len(ul_list)
+                        total_combinations += len(uw_list)
 
                     print(f"     [INCREMENTAL] Total de combinaciones a procesar: {total_combinations}")
 
                     # Procesar combinaciones incrementalmente
                     comb_idx = 0
                     for e1_idx, e1 in enumerate(exp_A, start=1):
-                        calls1, puts1, _, _ = precache[e1]
+                        _, puts1, _, _ = precache[e1]
                         strikes_puts1 = sorted(set(puts1["strike"].tolist()))
-                        strikes_calls1 = sorted(set(calls1["strike"].tolist()))
 
                         puts1_idx = puts1.set_index("strike")
-                        calls1_idx = calls1.set_index("strike")
 
                         print(f"     [INCREMENTAL] Exp1 {e1_idx}/{len(exp_A)}: {e1} (DTE={dte_map[e1]})")
 
-                        # Generar candidatos para DTE1 (puts + short calls)
-                        ul_list = gen_uw_put_candidates_by_delta(puts1_idx, strikes_puts1, spot, dte_map[e1], r_base, UL_PUT_DELTA_MIN, UL_PUT_DELTA_MAX)
-                        shorts_list = gen_body_put_candidates_by_delta(puts1_idx, strikes_puts1, spot, dte_map[e1], r_base, SHORT_PUT_DELTA_MIN, SHORT_PUT_DELTA_MAX)
-                        ll_list = gen_lw_put_candidates_by_delta(puts1_idx, strikes_puts1, spot, dte_map[e1], r_base, LL_PUT_DELTA_MIN, LL_PUT_DELTA_MAX)
-                        short_call_list = gen_short_call_candidates_by_delta(calls1_idx, strikes_calls1, spot, dte_map[e1], r_base, SHORT_CALL_DELTA_MIN, SHORT_CALL_DELTA_MAX)
+                        # Generar candidatos para DTE1 (solo puts)
+                        uw_list = gen_uw_put_candidates_by_delta(puts1_idx, strikes_puts1, spot, dte_map[e1], r_base, UW_PUT_DELTA_MIN, UW_PUT_DELTA_MAX)
+                        body_list = gen_body_put_candidates_by_delta(puts1_idx, strikes_puts1, spot, dte_map[e1], r_base, BODY_PUT_DELTA_MIN, BODY_PUT_DELTA_MAX)
+                        lw_list = gen_lw_put_candidates_by_delta(puts1_idx, strikes_puts1, spot, dte_map[e1], r_base, LW_PUT_DELTA_MIN, LW_PUT_DELTA_MAX)
 
-                        if not ul_list or not shorts_list or not ll_list or not short_call_list:
+                        if not uw_list or not body_list or not lw_list:
                             print(f"       → Sin candidatos válidos para exp1={e1}")
                             continue
 
-                        print(f"       → UL:{len(ul_list)} Shorts:{len(shorts_list)} LL:{len(ll_list)} ShortCalls:{len(short_call_list)}")
+                        print(f"       → UW:{len(uw_list)} Body:{len(body_list)} LW:{len(lw_list)}")
 
-                        for e2_idx, e2 in enumerate(exp_B, start=1):
-                            calls2, _, _, _ = precache[e2]
-                            strikes_calls2 = sorted(set(calls2["strike"].tolist()))
-                            calls2_idx = calls2.set_index("strike")
+                        # Procesar cada k_uw individualmente
+                        for uw_idx, k_uw in enumerate(uw_list, start=1):
+                            comb_idx += 1
 
-                            # Generar candidatos para DTE2 (long calls con rango delta independiente)
-                            long_call_list = gen_long_call_candidates_by_delta(calls2_idx, strikes_calls2, spot, dte_map[e2], r_base, LONG_CALL_DELTA_MIN, LONG_CALL_DELTA_MAX)
+                            # Log detallado cada combinación
+                            if comb_idx % 10 == 0 or comb_idx == total_combinations:
+                                progress_pct = 100 * comb_idx / max(1, total_combinations)
+                                print(f"       [INCR {comb_idx}/{total_combinations} ({progress_pct:.1f}%)] E1={e1} UW={k_uw:.0f} → Procesando...")
 
-                            if not long_call_list:
-                                print(f"       [INCREMENTAL] Exp2 {e2_idx}/{len(exp_B)}: {e2} (DTE={dte_map[e2]}) → Sin candidatos long calls válidos")
-                                continue
+                            # Preparar tarea para Butterfly
+                            task = (
+                                k_uw, body_list, lw_list, e1, dte_map, spot, r_base,
+                                date_es_str, hhmm_es, _hhmm_us, base_idx,
+                                puts1.reset_index(drop=True),
+                                FRAC_SUFFIXES, USE_LIQUIDITY_FILTERS,
+                                MIN_OI_FRONT, MIN_VOL_FRONT,
+                                PREFILTER_CREDIT_MIN, PREFILTER_CREDIT_MAX
+                            )
 
-                            print(f"       [INCREMENTAL] Exp2 {e2_idx}/{len(exp_B)}: {e2} (DTE={dte_map[e2]}) → LongCalls:{len(long_call_list)}")
+                            # Procesar inmediatamente (sin acumular)
+                            if INCREMENTAL_WORKERS == 1:
+                                # Modo secuencial (mínima memoria)
+                                result_rows = _process_butterfly_candidate(task)
+                            else:
+                                # Modo semi-paralelo (procesar con pool pequeño)
+                                with ProcessPoolExecutor(max_workers=INCREMENTAL_WORKERS) as micro_executor:
+                                    result_rows = list(micro_executor.map(_process_butterfly_candidate, [task]))[0]
 
-                            # Procesar cada k_ul individualmente
-                            for ul_idx, k_ul in enumerate(ul_list, start=1):
-                                comb_idx += 1
+                            # ========== APLICAR TODOS LOS FILTROS ANTES DE ESCRIBIR ==========
+                            # MODO INCREMENTAL: Filtrar result_rows para eliminar "basura" antes de escribir al CSV
+                            # Aplica TODOS los filtros configurados para reducir datos temporales:
+                            #   - NET_CREDIT (PREFILTER_CREDIT_MIN/MAX)
+                            #   - DELTA_TOTAL (DELTA_MIN/MAX)
+                            #   - THETA_TOTAL (THETA_MIN/MAX)
+                            #   - BQI (si FILTER_BQI_ENABLED - BQI_MIN/MAX)
+                            #   - LEL (si FILTER_LEL_ENABLED - LEL_MIN/MAX)
+                            #   - UEL (si FILTER_UEL_ENABLED - UEL_MIN/MAX)
+                            # Solo las filas que pasen TODOS los filtros se escriben al CSV temporal
+                            candidates_before_filter = len(result_rows) if result_rows else 0
+                            if result_rows:
+                                filtered_rows = []
+                                for row in result_rows:
+                                    # Aplicar todos los filtros configurados
+                                    passes_filters = True
 
-                                # Log detallado cada combinación
+                                    # Filtro NET_CREDIT
+                                    if "net_credit" in row:
+                                        if not (PREFILTER_CREDIT_MIN <= row["net_credit"] <= PREFILTER_CREDIT_MAX):
+                                            passes_filters = False
+
+                                    # Filtro DELTA_TOTAL
+                                    if passes_filters and "delta_total" in row:
+                                        if not (DELTA_MIN <= row["delta_total"] <= DELTA_MAX):
+                                            passes_filters = False
+
+                                    # Filtro THETA_TOTAL
+                                    if passes_filters and "theta_total" in row:
+                                        if not (THETA_MIN <= row["theta_total"] <= THETA_MAX):
+                                            passes_filters = False
+
+                                    # Filtro BQI (si está habilitado)
+                                    if passes_filters and FILTER_BQI_ENABLED and "BQI" in row:
+                                        if row["BQI"] is None or pd.isna(row["BQI"]):
+                                            passes_filters = False
+                                        elif not (BQI_MIN <= row["BQI"] <= BQI_MAX):
+                                            passes_filters = False
+
+                                    # Filtro LEL (si está habilitado)
+                                    if passes_filters and FILTER_LEL_ENABLED and "LEL_pts" in row:
+                                        if row["LEL_pts"] is None or pd.isna(row["LEL_pts"]):
+                                            passes_filters = False
+                                        elif not (LEL_MIN <= row["LEL_pts"] <= LEL_MAX):
+                                            passes_filters = False
+
+                                    # Filtro UEL (si está habilitado)
+                                    if passes_filters and FILTER_UEL_ENABLED and "UEL_pts" in row:
+                                        if row["UEL_pts"] is None or pd.isna(row["UEL_pts"]):
+                                            passes_filters = False
+                                        elif not (UEL_MIN <= row["UEL_pts"] <= UEL_MAX):
+                                            passes_filters = False
+
+                                    # Si pasa todos los filtros, agregar a filtered_rows
+                                    if passes_filters:
+                                        filtered_rows.append(row)
+
+                                # Actualizar estadísticas
+                                total_candidates_generated += candidates_before_filter
+                                candidates_filtered = candidates_before_filter - len(filtered_rows)
+                                total_candidates_filtered += candidates_filtered
+
+                                result_rows = filtered_rows  # Reemplazar con filas filtradas
+                            # ========== FIN FILTRADO ==========
+
+                            # Escribir inmediatamente si hay resultados (ya filtrados)
+                            if result_rows:
+                                if csv_writer is None:
+                                    # Primera escritura: crear header con orden de columnas preferido
+                                    csv_file_handle = open(temp_csv_path, 'w', newline='', encoding='utf-8')
+                                    ordered_fieldnames = get_ordered_fieldnames(result_rows[0].keys())
+                                    csv_writer = csv.DictWriter(csv_file_handle, fieldnames=ordered_fieldnames)
+                                    csv_writer.writeheader()
+
+                                csv_writer.writerows(result_rows)
+                                csv_file_handle.flush()  # Forzar escritura a disco
+                                total_candidates_written += len(result_rows)
+
                                 if comb_idx % 10 == 0 or comb_idx == total_combinations:
-                                    progress_pct = 100 * comb_idx / max(1, total_combinations)
-                                    print(f"       [INCR {comb_idx}/{total_combinations} ({progress_pct:.1f}%)] E1={e1} E2={e2} UL={k_ul:.0f} → Procesando...")
+                                    print(f"         ✓ Escritos {len(result_rows)} candidatos → Total acum: {total_candidates_written}")
 
-                                # Preparar tarea (ahora con short_call_list y long_call_list separados)
-                                task = (
-                                    k_ul, shorts_list, ll_list, short_call_list, long_call_list, e1, e2, dte_map, spot, r_base,
-                                    date_es_str, hhmm_es, _hhmm_us, base_idx,
-                                    puts1.reset_index(drop=True),
-                                    calls1.reset_index(drop=True),
-                                    calls2.reset_index(drop=True),
-                                    FRAC_SUFFIXES, USE_LIQUIDITY_FILTERS,
-                                    MIN_OI_FRONT, MIN_VOL_FRONT, MIN_OI_BACK, MIN_VOL_BACK,
-                                    PREFILTER_CREDIT_MIN, PREFILTER_CREDIT_MAX
-                                )
-
-                                # Procesar inmediatamente (sin acumular)
-                                if INCREMENTAL_WORKERS == 1:
-                                    # Modo secuencial (mínima memoria)
-                                    result_rows = _process_butterfly_candidate(task)
-                                else:
-                                    # Modo semi-paralelo (procesar con pool pequeño)
-                                    with ProcessPoolExecutor(max_workers=INCREMENTAL_WORKERS) as micro_executor:
-                                        result_rows = list(micro_executor.map(_process_butterfly_candidate, [task]))[0]
-
-                                # ========== APLICAR TODOS LOS FILTROS ANTES DE ESCRIBIR ==========
-                                # MODO INCREMENTAL: Filtrar result_rows para eliminar "basura" antes de escribir al CSV
-                                # Aplica TODOS los filtros configurados para reducir datos temporales:
-                                #   - NET_CREDIT (PREFILTER_CREDIT_MIN/MAX)
-                                #   - DELTA_TOTAL (DELTA_MIN/MAX)
-                                #   - THETA_TOTAL (THETA_MIN/MAX)
-                                #   - UEL_inf_USD (UEL_INF_MIN/MAX)
-                                #   - PnLDV (si FILTER_PNLDV_ENABLED)
-                                #   - AQI (si FILTER_AQI_ENABLED - AQI_MIN/MAX)
-                                #   - LEL (si FILTER_LEL_ENABLED - LEL_MIN/MAX)
-                                #   - UEL (si FILTER_UEL_ENABLED - UEL_MIN/MAX)
-                                # Solo las filas que pasen TODOS los filtros se escriben al CSV temporal
-                                candidates_before_filter = len(result_rows) if result_rows else 0
-                                if result_rows:
-                                    filtered_rows = []
-                                    for row in result_rows:
-                                        # Aplicar todos los filtros configurados
-                                        passes_filters = True
-
-                                        # Filtro NET_CREDIT
-                                        if "net_credit" in row:
-                                            if not (PREFILTER_CREDIT_MIN <= row["net_credit"] <= PREFILTER_CREDIT_MAX):
-                                                passes_filters = False
-
-                                        # Filtro DELTA_TOTAL
-                                        if passes_filters and "delta_total" in row:
-                                            if not (DELTA_MIN <= row["delta_total"] <= DELTA_MAX):
-                                                passes_filters = False
-
-                                        # Filtro THETA_TOTAL
-                                        if passes_filters and "theta_total" in row:
-                                            if not (THETA_MIN <= row["theta_total"] <= THETA_MAX):
-                                                passes_filters = False
-
-                                        # Filtro UEL_inf_USD
-                                        if passes_filters and "UEL_inf_USD" in row:
-                                            if not (UEL_INF_MIN <= row["UEL_inf_USD"] <= UEL_INF_MAX):
-                                                passes_filters = False
-
-                                        # Filtro PnLDV (si está habilitado)
-                                        if passes_filters and FILTER_PNLDV_ENABLED and "PnLDV" in row:
-                                            if row["PnLDV"] is None or pd.isna(row["PnLDV"]):
-                                                passes_filters = False
-                                            elif not (PNLDV_MIN <= row["PnLDV"] <= PNLDV_MAX):
-                                                passes_filters = False
-
-                                        # Filtro AQI (si está habilitado)
-                                        if passes_filters and FILTER_AQI_ENABLED and "AQI" in row:
-                                            if row["AQI"] is None or pd.isna(row["AQI"]):
-                                                passes_filters = False
-                                            elif not (AQI_MIN <= row["AQI"] <= AQI_MAX):
-                                                passes_filters = False
-
-                                        # Filtro LEL (si está habilitado)
-                                        if passes_filters and FILTER_LEL_ENABLED and "LEL_pts" in row:
-                                            if row["LEL_pts"] is None or pd.isna(row["LEL_pts"]):
-                                                passes_filters = False
-                                            elif not (LEL_MIN <= row["LEL_pts"] <= LEL_MAX):
-                                                passes_filters = False
-
-                                        # Filtro UEL (si está habilitado)
-                                        if passes_filters and FILTER_UEL_ENABLED and "UEL_pts" in row:
-                                            if row["UEL_pts"] is None or pd.isna(row["UEL_pts"]):
-                                                passes_filters = False
-                                            elif not (UEL_MIN <= row["UEL_pts"] <= UEL_MAX):
-                                                passes_filters = False
-
-                                        # Si pasa todos los filtros, agregar a filtered_rows
-                                        if passes_filters:
-                                            filtered_rows.append(row)
-
-                                    # Actualizar estadísticas
-                                    total_candidates_generated += candidates_before_filter
-                                    candidates_filtered = candidates_before_filter - len(filtered_rows)
-                                    total_candidates_filtered += candidates_filtered
-
-                                    result_rows = filtered_rows  # Reemplazar con filas filtradas
-                                # ========== FIN FILTRADO ==========
-
-                                # Escribir inmediatamente si hay resultados (ya filtrados)
-                                if result_rows:
-                                    if csv_writer is None:
-                                        # Primera escritura: crear header con orden de columnas preferido
-                                        csv_file_handle = open(temp_csv_path, 'w', newline='', encoding='utf-8')
-                                        ordered_fieldnames = get_ordered_fieldnames(result_rows[0].keys())
-                                        csv_writer = csv.DictWriter(csv_file_handle, fieldnames=ordered_fieldnames)
-                                        csv_writer.writeheader()
-
-                                    csv_writer.writerows(result_rows)
-                                    csv_file_handle.flush()  # Forzar escritura a disco
-                                    total_candidates_written += len(result_rows)
-
-                                    if comb_idx % 10 == 0 or comb_idx == total_combinations:
-                                        print(f"         ✓ Escritos {len(result_rows)} candidatos → Total acum: {total_candidates_written}")
-
-                                # Liberar memoria inmediatamente
-                                del result_rows
+                            # Liberar memoria inmediatamente
+                            del result_rows
 
                     # Cerrar archivo CSV
                     if csv_file_handle:
