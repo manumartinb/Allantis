@@ -1790,24 +1790,19 @@ def batman_value_from_df(one_min_df: pd.DataFrame, exp1: str, k1: float, exp2: s
     except Exception:
         return None
 
-def allantis_value_from_df(one_min_df: pd.DataFrame, exp1: str, k_ul: float, k_shorts: float,
-                            k_ll: float, k_call_short: float, k_call_long: float, exp2: str, root1=None, root2=None):
+def butterfly_value_from_df(one_min_df: pd.DataFrame, exp1: str, k_uw: float, k_body: float,
+                            k_lw: float, root1=None):
     """
-    Revaloriza estructura Allantis de 5 patas:
-    - BWB Puts @ DTE1: +4P@k_ul : -8P@k_shorts : +4P@k_ll
-    - Call Calendar: -2C@k_call_short(exp1) : +2C@k_call_long(exp2)
+    Revaloriza estructura Butterfly de 3 patas:
+    - Butterfly Puts @ DTE1: +4P@k_uw : -8P@k_body : +4P@k_lw
 
     Args:
         one_min_df: DataFrame con snapshot del mercado
-        exp1: Expiración DTE1 (puts + short call)
-        k_ul: Strike Upper Line puts (long 4P)
-        k_shorts: Strike Short puts (short 8P)
-        k_ll: Strike Lower Line puts (long 4P)
-        k_call_short: Strike para short call @ DTE1
-        k_call_long: Strike para long call @ DTE2
-        exp2: Expiración DTE2 (long calls)
+        exp1: Expiración DTE1 (todas las puts)
+        k_uw: Strike Upper Wing puts (long 4P)
+        k_body: Strike Body puts (short 8P)
+        k_lw: Strike Lower Wing puts (long 4P)
         root1: Root esperado para exp1 (SPX/SPXW)
-        root2: Root esperado para exp2 (SPX/SPXW)
 
     Returns:
         dict con net_credit (puntos SPX) y detalles de cada pata,
@@ -1834,52 +1829,38 @@ def allantis_value_from_df(one_min_df: pd.DataFrame, exp1: str, k_ul: float, k_s
         return None
 
     try:
-        # Filtrar por right y expiración
+        # Filtrar por right y expiración (solo puts @ exp1)
         puts1 = one_min_df[(one_min_df["right"].str.upper()=="P") & (one_min_df["expiration"].astype(str)==exp1)]
-        calls1 = one_min_df[(one_min_df["right"].str.upper()=="C") & (one_min_df["expiration"].astype(str)==exp1)]
-        calls2 = one_min_df[(one_min_df["right"].str.upper()=="C") & (one_min_df["expiration"].astype(str)==exp2)]
 
         # Aplicar filtro estricto de root
-        puts1_filt, root1_pref_applied_p, root1_chosen_p = filter_df_by_root_strict(puts1.copy(), root1)
-        calls1_filt, root1_pref_applied_c, root1_chosen_c = filter_df_by_root_strict(calls1.copy(), root1)
-        calls2_filt, root2_pref_applied, root2_chosen = filter_df_by_root_strict(calls2.copy(), root2)
+        puts1_filt, root1_pref_applied, root1_chosen = filter_df_by_root_strict(puts1.copy(), root1)
 
         # Convertir strikes a numérico
         puts1_filt["strike"] = pd.to_numeric(puts1_filt["strike"], errors="coerce")
-        calls1_filt["strike"] = pd.to_numeric(calls1_filt["strike"], errors="coerce")
-        calls2_filt["strike"] = pd.to_numeric(calls2_filt["strike"], errors="coerce")
 
         # Buscar strikes de puts @ exp1
-        r_ul = puts1_filt.loc[np.isclose(puts1_filt["strike"], float(k_ul), atol=1e-6)]
-        r_shorts = puts1_filt.loc[np.isclose(puts1_filt["strike"], float(k_shorts), atol=1e-6)]
-        r_ll = puts1_filt.loc[np.isclose(puts1_filt["strike"], float(k_ll), atol=1e-6)]
-
-        # Buscar strikes de calls (ahora independientes)
-        r_c_short = calls1_filt.loc[np.isclose(calls1_filt["strike"], float(k_call_short), atol=1e-6)]
-        r_c_long = calls2_filt.loc[np.isclose(calls2_filt["strike"], float(k_call_long), atol=1e-6)]
+        r_uw = puts1_filt.loc[np.isclose(puts1_filt["strike"], float(k_uw), atol=1e-6)]
+        r_body = puts1_filt.loc[np.isclose(puts1_filt["strike"], float(k_body), atol=1e-6)]
+        r_lw = puts1_filt.loc[np.isclose(puts1_filt["strike"], float(k_lw), atol=1e-6)]
 
         # Verificar que todos los strikes existen
-        if r_ul.empty or r_shorts.empty or r_ll.empty or r_c_short.empty or r_c_long.empty:
+        if r_uw.empty or r_body.empty or r_lw.empty:
             return None
 
         # Selección inteligente de la mejor fila
-        row_ul, tie_ul = select_best_strike_row(r_ul, base_mid=None)
-        row_shorts, tie_shorts = select_best_strike_row(r_shorts, base_mid=None)
-        row_ll, tie_ll = select_best_strike_row(r_ll, base_mid=None)
-        row_c_short, tie_c_short = select_best_strike_row(r_c_short, base_mid=None)
-        row_c_long, tie_c_long = select_best_strike_row(r_c_long, base_mid=None)
+        row_uw, tie_uw = select_best_strike_row(r_uw, base_mid=None)
+        row_body, tie_body = select_best_strike_row(r_body, base_mid=None)
+        row_lw, tie_lw = select_best_strike_row(r_lw, base_mid=None)
 
-        if any(r is None for r in [row_ul, row_shorts, row_ll, row_c_short, row_c_long]):
+        if any(r is None for r in [row_uw, row_body, row_lw]):
             return None
 
         # Obtener precios mid
-        mid_ul = get_mid_from_row(row_ul)
-        mid_shorts = get_mid_from_row(row_shorts)
-        mid_ll = get_mid_from_row(row_ll)
-        mid_c_short = get_mid_from_row(row_c_short)
-        mid_c_long = get_mid_from_row(row_c_long)
+        mid_uw = get_mid_from_row(row_uw)
+        mid_body = get_mid_from_row(row_body)
+        mid_lw = get_mid_from_row(row_lw)
 
-        if not all(np.isfinite(m) for m in [mid_ul, mid_shorts, mid_ll, mid_c_short, mid_c_long]):
+        if not all(np.isfinite(m) for m in [mid_uw, mid_body, mid_lw]):
             return None
 
         def _build_leg(row, idx, mid, tie_break, root_pref_applied, root_chosen, expected_root):
@@ -1898,33 +1879,25 @@ def allantis_value_from_df(one_min_df: pd.DataFrame, exp1: str, k_ul: float, k_s
             }
 
         # Construir legs
-        leg_ul = _build_leg(row_ul, r_ul.index[0] if len(r_ul) > 0 else None, mid_ul, tie_ul,
-                           root1_pref_applied_p, root1_chosen_p, root1)
-        leg_shorts = _build_leg(row_shorts, r_shorts.index[0] if len(r_shorts) > 0 else None, mid_shorts,
-                               tie_shorts, root1_pref_applied_p, root1_chosen_p, root1)
-        leg_ll = _build_leg(row_ll, r_ll.index[0] if len(r_ll) > 0 else None, mid_ll, tie_ll,
-                           root1_pref_applied_p, root1_chosen_p, root1)
-        leg_c_short = _build_leg(row_c_short, r_c_short.index[0] if len(r_c_short) > 0 else None, mid_c_short,
-                                tie_c_short, root1_pref_applied_c, root1_chosen_c, root1)
-        leg_c_long = _build_leg(row_c_long, r_c_long.index[0] if len(r_c_long) > 0 else None, mid_c_long,
-                               tie_c_long, root2_pref_applied, root2_chosen, root2)
+        leg_uw = _build_leg(row_uw, r_uw.index[0] if len(r_uw) > 0 else None, mid_uw, tie_uw,
+                           root1_pref_applied, root1_chosen, root1)
+        leg_body = _build_leg(row_body, r_body.index[0] if len(r_body) > 0 else None, mid_body,
+                             tie_body, root1_pref_applied, root1_chosen, root1)
+        leg_lw = _build_leg(row_lw, r_lw.index[0] if len(r_lw) > 0 else None, mid_lw, tie_lw,
+                           root1_pref_applied, root1_chosen, root1)
 
-        # Calcular net_credit: +4P@UL -8P@Shorts +4P@LL -2C@Short +2C@Long (puntos SPX)
+        # Calcular net_credit: +4P@UW -8P@Body +4P@LW (puntos SPX)
         net_credit = float(
-            +4 * mid_ul
-            - 8 * mid_shorts
-            + 4 * mid_ll
-            - 2 * mid_c_short
-            + 2 * mid_c_long
+            +4 * mid_uw
+            - 8 * mid_body
+            + 4 * mid_lw
         )
 
         return {
             "net_credit": net_credit,
-            "leg_ul": leg_ul,
-            "leg_shorts": leg_shorts,
-            "leg_ll": leg_ll,
-            "leg_c_short": leg_c_short,
-            "leg_c_long": leg_c_long
+            "leg_uw": leg_uw,
+            "leg_body": leg_body,
+            "leg_lw": leg_lw
         }
     except Exception:
         return None
@@ -2447,192 +2420,53 @@ def compute_butterfly_metrics(spot, r_base, exp1, dte1, k_uw, k_body, k_lw, prec
     if float(k_body) < be2_candidate < float(k_uw):
         BE2_strike = be2_candidate
 
-    # --- 6. VALLE (PnLDVAllantis) - Mínimo entre BWB y Calendar Call ---
-    # En región S >= k_ul: PnL_BWB = -net_debit (plana)
-    # PnL_CCAL = 2·BS_Call(S, k_call, τ, r2, σ_call)
-    # Valle ocurre donde la suma es mínima
+    # --- 6. UEL (Upper Expiration Line) - Asíntota superior ---
+    # Cuando S > k_uw: todas las puts están OTM (sin valor)
+    # PnL = -net_debit (constante, sin componente de calls)
+    UEL_pts = -net_debit
+    UEL_USD = UEL_pts * 100.0
 
-    # Función auxiliar para calcular PnL total en un precio S
-    def pnl_total_at_S(S, k_ul_f, k_shorts_f, k_ll_f, k_call_f, tau_f, r2_f, iv_call_f, net_debit_f):
-        """Calcula PnL total de Allantis en precio S al vencimiento DTE1"""
-        # PnL BWB de Puts
-        if S < k_ll_f:
-            pnl_bwb = 4*k_ul_f - 8*k_shorts_f + 4*k_ll_f - net_debit_f
-        elif S < k_shorts_f:
-            pnl_bwb = (4*k_ul_f - 8*k_shorts_f - net_debit_f) + 4*S
-        elif S < k_ul_f:
-            pnl_bwb = 4*k_ul_f - 4*S - net_debit_f
-        else:
-            pnl_bwb = -net_debit_f
-
-        # PnL Call Calendar
-        if tau_f > 0 and iv_call_f is not None and not math.isnan(iv_call_f) and iv_call_f > 0:
-            # Long call @ DTE2 sigue viva con tiempo restante τ
-            long_call_value = bs_call_price(S, k_call_f, tau_f, r2_f, iv_call_f, q=0.0)
-            # Short call @ DTE1 ha vencido
-            short_call_payoff = max(S - k_call_f, 0.0)
-            pnl_ccal = 2*long_call_value - 2*short_call_payoff
-        else:
-            pnl_ccal = 0.0
-
-        return pnl_bwb + pnl_ccal
-
-    # Buscar valle entre k_ul y max(k_call_short, k_call_long) usando búsqueda numérica
-    VALLE_strike = None
-    VALLE_PnL_pts = None
-    VALLE_PnL_USD = None
-
-    if tau > 0 and iv_c_long is not None and not math.isnan(iv_c_long) and iv_c_long > 0:
-        # Rango de búsqueda del valle: [k_ul, max(k_call_short, k_call_long)]
-        # El valle puede estar influenciado por ambos strikes de calls
-        max_call_strike = max(float(k_call_short), float(k_call_long))
-        if float(k_ul) < max_call_strike:
-            # Muestrear 100 puntos en el rango
-            search_range = np.linspace(float(k_ul), max_call_strike, 100)
-            pnl_values = [pnl_total_at_S(s, float(k_ul), float(k_shorts), float(k_ll),
-                                         float(k_call_short), float(k_call_long), tau, r2, float(iv_c_long), net_debit)
-                         for s in search_range]
-            min_idx = np.argmin(pnl_values)
-            VALLE_strike = search_range[min_idx]
-            VALLE_PnL_pts = pnl_values[min_idx]
-            VALLE_PnL_USD = VALLE_PnL_pts * 100.0
-
-    # --- 7. BreakEvenCCAL1 - Primer breakeven del Call Calendar ---
-    # Buscar raíz de PnL_Total(S) = 0 en región [VALLE, max_call_strike]
-    BreakEvenCCAL1_strike = None
-
-    if VALLE_strike is not None and tau > 0 and iv_c_long is not None and not math.isnan(iv_c_long):
-        from scipy.optimize import brentq
-        try:
-            max_call_strike = max(float(k_call_short), float(k_call_long))
-            # Definir función objetivo
-            def pnl_for_solver(s):
-                return pnl_total_at_S(s, float(k_ul), float(k_shorts), float(k_ll),
-                                     float(k_call_short), float(k_call_long), tau, r2, float(iv_c_long), net_debit)
-
-            # Buscar raíz entre valle y max_call_strike
-            # Primero verificar que hay cambio de signo
-            pnl_at_valle = pnl_for_solver(VALLE_strike)
-            pnl_at_kcall = pnl_for_solver(max_call_strike)
-
-            if pnl_at_valle * pnl_at_kcall < 0:  # Cambio de signo
-                BreakEvenCCAL1_strike = brentq(pnl_for_solver, VALLE_strike, max_call_strike)
-        except:
-            pass  # Si falla, dejar como None
-
-    # --- 8. PICOCCAL - Máximo del Call Calendar ---
-    # Buscar máximo de PnL_Total(S) en región alrededor del promedio de strikes de calls
-    PICOCCAL_strike = None
-    PICOCCAL_PnL_pts = None
-    PICOCCAL_PnL_USD = None
-
-    if tau > 0 and iv_c_long is not None and not math.isnan(iv_c_long):
-        # Usar promedio de strikes de calls como centro de búsqueda
-        avg_call_strike = (float(k_call_short) + float(k_call_long)) / 2.0
-        # Rango de búsqueda: [avg*0.95, avg*1.15]
-        search_start = avg_call_strike * 0.95
-        search_end = avg_call_strike * 1.15
-        search_range_ccal = np.linspace(search_start, search_end, 100)
-        pnl_values_ccal = [pnl_total_at_S(s, float(k_ul), float(k_shorts), float(k_ll),
-                                          float(k_call_short), float(k_call_long), tau, r2, float(iv_c_long), net_debit)
-                          for s in search_range_ccal]
-        max_idx = np.argmax(pnl_values_ccal)
-        PICOCCAL_strike = search_range_ccal[max_idx]
-        PICOCCAL_PnL_pts = pnl_values_ccal[max_idx]
-        PICOCCAL_PnL_USD = PICOCCAL_PnL_pts * 100.0
-
-    # --- 9. BreakEvenCCAL2 - Segundo breakeven del Call Calendar ---
-    # Buscar raíz de PnL_Total(S) = 0 en región [PICOCCAL, avg_call_strike*1.5]
-    BreakEvenCCAL2_strike = None
-
-    if PICOCCAL_strike is not None and tau > 0 and iv_c_long is not None and not math.isnan(iv_c_long):
-        from scipy.optimize import brentq
-        try:
-            avg_call_strike = (float(k_call_short) + float(k_call_long)) / 2.0
-            def pnl_for_solver(s):
-                return pnl_total_at_S(s, float(k_ul), float(k_shorts), float(k_ll),
-                                     float(k_call_short), float(k_call_long), tau, r2, float(iv_c_long), net_debit)
-
-            # Buscar raíz entre PICOCCAL y avg_call_strike*1.5
-            search_end = avg_call_strike * 1.5
-            pnl_at_pico = pnl_for_solver(PICOCCAL_strike)
-            pnl_at_end = pnl_for_solver(search_end)
-
-            if pnl_at_pico * pnl_at_end < 0:  # Cambio de signo
-                BreakEvenCCAL2_strike = brentq(pnl_for_solver, PICOCCAL_strike, search_end)
-        except:
-            pass
-
-    # --- 10. UEL (Upper Expiration Line) - Asíntota superior ---
-    # Cuando S -> ∞: PnL = -net_debit + 2·k_call_long·(1 - e^(-r2·τ))
-    # NOTA: Usamos k_call_long porque es la long call que sigue viva en DTE2
-    UEL_pts = None
-    UEL_USD = None
-    if tau > 0:
-        UEL_pts = -net_debit + 2*float(k_call_long)*(1 - math.exp(-r2*tau))
-        UEL_USD = UEL_pts * 100.0
-
-    # --- 11. MASTER_DISTANCE - Distancia entre breakevens ---
-    # Diferencia entre BreakEvenBWB1_strike y BreakEvenCCAL2_strike
-    MASTER_DISTANCE = None
-    if BreakEvenBWB1_strike is not None and BreakEvenCCAL2_strike is not None:
-        MASTER_DISTANCE = BreakEvenBWB1_strike - BreakEvenCCAL2_strike
-
-    # --- 12. AQI (Allantis Quality Index) - Indicador de calidad global ---
-    # Similar a BQI_ABS de Batman, pero adaptado a métricas de Allantis
-    # Premia el balance entre todas las métricas (no solo tener algunas muy buenas)
-    AQI = None
+    # --- 7. BQI (Butterfly Quality Index) - Indicador de calidad global ---
+    # Simplificación de AQI para Butterfly pura (sin calendar call)
+    # Balancea 4 componentes: LEL, UEL, PICO, Theta
+    BQI = None
 
     # Solo calcular si tenemos todas las métricas necesarias
     if (LEL_pts is not None and UEL_pts is not None and
-        PICOBWB_PnL_pts is not None and PICOCCAL_PnL_pts is not None and
-        VALLE_PnL_pts is not None and theta_total is not None and
-        MASTER_DISTANCE is not None):
+        PICO_PnL_pts is not None and theta_total is not None):
 
         # Constantes de normalización y pesos
-        # Estos valores se pueden ajustar según la experiencia
         EPS = 1e-6  # Epsilon para evitar división por cero
 
-        # Pesos (theta tiene peso levemente superior: 1.2 vs 1.0 para el resto)
+        # Pesos balanceados (theta tiene peso levemente superior: 1.2 vs 1.0)
         W_LEL = 1.0
         W_UEL = 1.0
-        W_PICO_BWB = 1.0
-        W_PICO_CCAL = 1.0
-        W_VALLE = 1.0
+        W_PICO = 1.0
         W_THETA = 1.2  # Peso levemente superior para theta
-        W_MASTER_DIST = 1.0
 
         # Normalizar cada métrica a escala [0, ∞) donde mayor es mejor
-        # LEL: normalizar usando un valor base típico (ej: 0 es malo, 5+ es bueno)
-        LEL_norm = max(0, LEL_pts) / (5.0 + EPS)
+        # LEL: normalizar usando un valor base típico (ej: -100 es malo, 0+ es bueno)
+        # Para Butterfly, LEL puede ser negativo (pérdida en extremo inferior)
+        LEL_norm = (LEL_pts + 100.0) / (50.0 + EPS)
+        LEL_norm = max(0, LEL_norm)  # Asegurar no negativo
 
         # UEL: normalizar usando un valor base típico
-        UEL_norm = max(0, UEL_pts) / (10.0 + EPS)
+        # Para Butterfly pura, UEL = -net_debit (puede ser negativo si crédito, positivo si débito)
+        # Queremos que UEL menos negativo sea mejor
+        UEL_norm = (UEL_pts + 100.0) / (50.0 + EPS)
+        UEL_norm = max(0, UEL_norm)  # Asegurar no negativo
 
-        # PICO BWB: normalizar (valores típicos 0-10)
-        PICO_BWB_norm = max(0, PICOBWB_PnL_pts) / (5.0 + EPS)
+        # PICO: normalizar (valores típicos 0-20 puntos para Butterfly)
+        PICO_norm = max(0, PICO_PnL_pts) / (10.0 + EPS)
 
-        # PICO CCAL: normalizar (valores típicos 0-10)
-        PICO_CCAL_norm = max(0, PICOCCAL_PnL_pts) / (5.0 + EPS)
-
-        # VALLE: convertir para que menos negativo sea mejor
-        # Si VALLE es -10, es peor que si es -2. Si es positivo, es excelente.
-        # Usamos: (VALLE + offset) / scale para normalizarlo
-        # Asumiendo que valles típicos están entre -20 y +5
-        VALLE_norm = (VALLE_PnL_pts + 20.0) / (10.0 + EPS)
-        VALLE_norm = max(0, VALLE_norm)  # Asegurar no negativo
-
-        # Theta: normalizar (valores típicos 0-50 en valor absoluto)
-        theta_norm = max(0, theta_total) / (20.0 + EPS)
-
-        # MASTER_DISTANCE: normalizar (valores típicos 0-200)
-        MASTER_DIST_norm = max(0, MASTER_DISTANCE) / (50.0 + EPS)
+        # Theta: normalizar (valores típicos 20-150 USD/día para Butterfly de 16 contratos)
+        theta_norm = max(0, theta_total) / (50.0 + EPS)
 
         # Calcular media geométrica ponderada
-        # Formula: AQI = (∏ metric_i^w_i)^(1/Σw_i)
+        # Formula: BQI = (∏ metric_i^w_i)^(1/Σw_i)
         # Esto penaliza fuertemente tener alguna métrica muy baja
 
-        sum_weights = W_LEL + W_UEL + W_PICO_BWB + W_PICO_CCAL + W_VALLE + W_THETA + W_MASTER_DIST
+        sum_weights = W_LEL + W_UEL + W_PICO + W_THETA
 
         # Para evitar log(0), añadimos un pequeño offset a cada métrica
         offset = 0.1
@@ -2641,21 +2475,19 @@ def compute_butterfly_metrics(spot, r_base, exp1, dte1, k_uw, k_body, k_lw, prec
             product_term = (
                 ((LEL_norm + offset) ** W_LEL) *
                 ((UEL_norm + offset) ** W_UEL) *
-                ((PICO_BWB_norm + offset) ** W_PICO_BWB) *
-                ((PICO_CCAL_norm + offset) ** W_PICO_CCAL) *
-                ((VALLE_norm + offset) ** W_VALLE) *
-                ((theta_norm + offset) ** W_THETA) *
-                ((MASTER_DIST_norm + offset) ** W_MASTER_DIST)
+                ((PICO_norm + offset) ** W_PICO) *
+                ((theta_norm + offset) ** W_THETA)
             )
 
             # Aplicar raíz (1/sum_weights)
-            AQI = product_term ** (1.0 / sum_weights)
+            BQI = product_term ** (1.0 / sum_weights)
 
             # Escalar a rango más interpretable (multiplicar por factor para que valores típicos estén en 1-10)
-            AQI = AQI * 2.0
+            BQI = BQI * 2.5
 
         except (ValueError, ZeroDivisionError, OverflowError):
-            AQI = None
+            BQI = None
+
 
     # Construir output
     out = {
@@ -2663,59 +2495,41 @@ def compute_butterfly_metrics(spot, r_base, exp1, dte1, k_uw, k_body, k_lw, prec
         "theta_total": round(theta_total, 6),
         "net_credit": round(net_credit, 4),
 
-        # Strikes
-        "k_ul": int(k_ul),
-        "k_shorts": int(k_shorts),
-        "k_ll": int(k_ll),
-        "k_call_short": int(k_call_short),  # Strike de short call @ DTE1
-        "k_call_long": int(k_call_long),    # Strike de long call @ DTE2
+        # Strikes (solo 3 patas de Butterfly)
+        "k_uw": int(k_uw),
+        "k_body": int(k_body),
+        "k_lw": int(k_lw),
 
-        # IVs
-        "iv_ul": iv_ul_fmt,
-        "iv_shorts": iv_shorts_fmt,
-        "iv_ll": iv_ll_fmt,
-        "iv_c_short": iv_c_short_fmt,
-        "iv_c_long": iv_c_long_fmt,
+        # IVs (solo 3 patas)
+        "iv_uw": iv_uw_fmt,
+        "iv_body": iv_body_fmt,
+        "iv_lw": iv_lw_fmt,
 
-        "DTE1/DTE2": f"{int(round(dte1))}/{int(round(dte2))}",
+        "DTE1": int(round(dte1)),
 
         # Greeks individuales de cada pata
-        "delta_ul": None if math.isnan(d_ul) else round(d_ul, 6),
-        "theta_ul": None if math.isnan(t_ul) else round(t_ul, 6),
-        "delta_shorts": None if math.isnan(d_shorts) else round(d_shorts, 6),
-        "theta_shorts": None if math.isnan(t_shorts) else round(t_shorts, 6),
-        "delta_ll": None if math.isnan(d_ll) else round(d_ll, 6),
-        "theta_ll": None if math.isnan(t_ll) else round(t_ll, 6),
-        "delta_c_short": None if math.isnan(d_c_short) else round(d_c_short, 6),
-        "theta_c_short": None if math.isnan(t_c_short) else round(t_c_short, 6),
-        "delta_c_long": None if math.isnan(d_c_long) else round(d_c_long, 6),
-        "theta_c_long": None if math.isnan(t_c_long) else round(t_c_long, 6),
+        "delta_uw": None if math.isnan(d_uw) else round(d_uw, 6),
+        "theta_uw": None if math.isnan(t_uw) else round(t_uw, 6),
+        "delta_body": None if math.isnan(d_body) else round(d_body, 6),
+        "theta_body": None if math.isnan(t_body) else round(t_body, 6),
+        "delta_lw": None if math.isnan(d_lw) else round(d_lw, 6),
+        "theta_lw": None if math.isnan(t_lw) else round(t_lw, 6),
 
         # Precios de cada pata
-        "price_bid_ul": None if math.isnan(bid_ul) else round(bid_ul, 4),
-        "price_ask_ul": None if math.isnan(ask_ul) else round(ask_ul, 4),
-        "price_last_ul": None if math.isnan(last_ul) else round(last_ul, 4),
-        "price_mid_ul": None if math.isnan(p_ul) else round(p_ul, 4),
+        "price_bid_uw": None if math.isnan(bid_uw) else round(bid_uw, 4),
+        "price_ask_uw": None if math.isnan(ask_uw) else round(ask_uw, 4),
+        "price_last_uw": None if math.isnan(last_uw) else round(last_uw, 4),
+        "price_mid_uw": None if math.isnan(p_uw) else round(p_uw, 4),
 
-        "price_bid_shorts": None if math.isnan(bid_shorts) else round(bid_shorts, 4),
-        "price_ask_shorts": None if math.isnan(ask_shorts) else round(ask_shorts, 4),
-        "price_last_shorts": None if math.isnan(last_shorts) else round(last_shorts, 4),
-        "price_mid_shorts": None if math.isnan(p_shorts) else round(p_shorts, 4),
+        "price_bid_body": None if math.isnan(bid_body) else round(bid_body, 4),
+        "price_ask_body": None if math.isnan(ask_body) else round(ask_body, 4),
+        "price_last_body": None if math.isnan(last_body) else round(last_body, 4),
+        "price_mid_body": None if math.isnan(p_body) else round(p_body, 4),
 
-        "price_bid_ll": None if math.isnan(bid_ll) else round(bid_ll, 4),
-        "price_ask_ll": None if math.isnan(ask_ll) else round(ask_ll, 4),
-        "price_last_ll": None if math.isnan(last_ll) else round(last_ll, 4),
-        "price_mid_ll": None if math.isnan(p_ll) else round(p_ll, 4),
-
-        "price_bid_c_short": None if math.isnan(bid_c_short) else round(bid_c_short, 4),
-        "price_ask_c_short": None if math.isnan(ask_c_short) else round(ask_c_short, 4),
-        "price_last_c_short": None if math.isnan(last_c_short) else round(last_c_short, 4),
-        "price_mid_c_short": None if math.isnan(p_c_short) else round(p_c_short, 4),
-
-        "price_bid_c_long": None if math.isnan(bid_c_long) else round(bid_c_long, 4),
-        "price_ask_c_long": None if math.isnan(ask_c_long) else round(ask_c_long, 4),
-        "price_last_c_long": None if math.isnan(last_c_long) else round(last_c_long, 4),
-        "price_mid_c_long": None if math.isnan(p_c_long) else round(p_c_long, 4),
+        "price_bid_lw": None if math.isnan(bid_lw) else round(bid_lw, 4),
+        "price_ask_lw": None if math.isnan(ask_lw) else round(ask_lw, 4),
+        "price_last_lw": None if math.isnan(last_lw) else round(last_lw, 4),
+        "price_mid_lw": None if math.isnan(p_lw) else round(p_lw, 4),
 
         # ========== PUNTOS GEOMÉTRICOS @ VENCIMIENTO DTE1 ==========
         # Asíntotas
@@ -2729,34 +2543,17 @@ def compute_butterfly_metrics(spot, r_base, exp1, dte1, k_uw, k_body, k_lw, prec
         "PuntoLEL_PnL_pts": round(PuntoLEL_PnL_pts, 2) if PuntoLEL_PnL_pts is not None else None,
         "PuntoLEL_PnL_USD": round(PuntoLEL_PnL_USD, 2) if PuntoLEL_PnL_USD is not None else None,
 
-        # Breakevens BWB
-        "BreakEvenBWB1_strike": round(BreakEvenBWB1_strike, 2) if BreakEvenBWB1_strike is not None else None,
-        "BreakEvenBWB2_strike": round(BreakEvenBWB2_strike, 2) if BreakEvenBWB2_strike is not None else None,
+        # Breakevens Butterfly
+        "BE1_strike": round(BE1_strike, 2) if BE1_strike is not None else None,
+        "BE2_strike": round(BE2_strike, 2) if BE2_strike is not None else None,
 
-        # Pico BWB
-        "PICOBWB_strike": round(PICOBWB_strike, 2) if PICOBWB_strike is not None else None,
-        "PICOBWB_PnL_pts": round(PICOBWB_PnL_pts, 2) if PICOBWB_PnL_pts is not None else None,
-        "PICOBWB_PnL_USD": round(PICOBWB_PnL_USD, 2) if PICOBWB_PnL_USD is not None else None,
+        # Pico Butterfly
+        "PICO_strike": round(PICO_strike, 2) if PICO_strike is not None else None,
+        "PICO_PnL_pts": round(PICO_PnL_pts, 2) if PICO_PnL_pts is not None else None,
+        "PICO_PnL_USD": round(PICO_PnL_USD, 2) if PICO_PnL_USD is not None else None,
 
-        # Valle (Death Valley de Allantis)
-        "VALLE_strike": round(VALLE_strike, 2) if VALLE_strike is not None else None,
-        "VALLE_PnL_pts": round(VALLE_PnL_pts, 2) if VALLE_PnL_pts is not None else None,
-        "VALLE_PnL_USD": round(VALLE_PnL_USD, 2) if VALLE_PnL_USD is not None else None,
-
-        # Breakevens Call Calendar
-        "BreakEvenCCAL1_strike": round(BreakEvenCCAL1_strike, 2) if BreakEvenCCAL1_strike is not None else None,
-        "BreakEvenCCAL2_strike": round(BreakEvenCCAL2_strike, 2) if BreakEvenCCAL2_strike is not None else None,
-
-        # Pico Call Calendar
-        "PICOCCAL_strike": round(PICOCCAL_strike, 2) if PICOCCAL_strike is not None else None,
-        "PICOCCAL_PnL_pts": round(PICOCCAL_PnL_pts, 2) if PICOCCAL_PnL_pts is not None else None,
-        "PICOCCAL_PnL_USD": round(PICOCCAL_PnL_USD, 2) if PICOCCAL_PnL_USD is not None else None,
-
-        # MASTER_DISTANCE - Distancia entre breakevens BWB y CCAL
-        "MASTER_DISTANCE": round(MASTER_DISTANCE, 2) if MASTER_DISTANCE is not None else None,
-
-        # AQI - Allantis Quality Index
-        "AQI": round(AQI, 4) if AQI is not None else None,
+        # BQI - Butterfly Quality Index
+        "BQI": round(BQI, 4) if BQI is not None else None,
     }
 
     return out
@@ -3090,17 +2887,14 @@ def _process_one_fwd_allantis(args):
                 if fwd_one_min.empty:
                     continue
 
-                # Revalorizar Allantis en este timestamp (5 patas)
-                av_details = allantis_value_from_df(
+                # Revalorizar Butterfly en este timestamp (3 patas)
+                av_details = butterfly_value_from_df(
                     fwd_one_min,
                     str(row_dict["exp1"]),
-                    float(row_dict["k_ul"]),
-                    float(row_dict["k_shorts"]),
-                    float(row_dict["k_ll"]),
-                    float(row_dict["k_call"]),
-                    str(row_dict["exp2"]),
-                    root1=base_root_exp1_norm,
-                    root2=base_root_exp2_norm
+                    float(row_dict["k_uw"]),
+                    float(row_dict["k_body"]),
+                    float(row_dict["k_lw"]),
+                    root1=base_root_exp1_norm
                 )
 
                 if not av_details or not np.isfinite(av_details.get("net_credit", np.nan)):
